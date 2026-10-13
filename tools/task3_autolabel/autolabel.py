@@ -52,22 +52,26 @@ CLASSES = [
 COLORS = ("Red", "Green", "Blue")
 
 # HSV ranges (OpenCV scale: H 0-179, S 0-255, V 0-255). Red wraps around 0.
-# The pads are fully saturated paint (S >= 244, even in shadow), while pavers,
-# blue-ish stains on the board and shadows stay below S ~ 220, so a high S
-# floor rejects them.
+# The pads are fully saturated paint (S >= 244 in the middle of the frame), while
+# pavers, shadows and blue-ish stains on the board stay below S ~ 220, so the
+# strict mask (S >= 235) seeds pads. Toward the frame edge the lens desaturates a
+# pad to S ~ 205, and the drone's shadow darkens it to V ~ 80, so once a pad is
+# seeded its edge and shadowed parts are recovered with the relaxed floors
+# below, but only inside the pad's own enclosing circle.
 # A pad in the drone's shadow drops to V ~ 80, so once a pad is found with the
 # strict floor its shadowed part is recovered with SHADOW_V_FLOOR, but only
 # inside the pad's own enclosing circle (the shadowed board is blue-ish too).
 HSV_RANGES = {
     "Red": [((0, 235, 110), (8, 255, 255)), ((170, 235, 110), (179, 255, 255))],
     "Green": [((45, 235, 110), (80, 255, 255))],
-    "Blue": [((100, 235, 110), (130, 255, 255))],
+    "Blue": [((106, 235, 110), (130, 255, 255))],   # blue-ish board stains sit at H ~ 100
 }
 SHADOW_V_FLOOR = 60
+RELAXED_S_FLOOR = 200
 
 # The landing gear is red and pokes into the top corners when the camera tilts.
 # The persistent part is also auto-masked (static_color_mask); this covers the rest.
-DEFAULT_MASK = ("0,0,0.1,0.2", "0.9,0,1,0.2")
+DEFAULT_MASK = ("0,0,0.15,0.2", "0.85,0,1,0.2")
 
 # Hue bands used to name a tin from its pixels (no V floor: dark/shaded cans).
 TIN_HUE = {"Red": [(0, 12), (165, 179)], "Green": [(40, 90), ], "Blue": [(95, 135)]}
@@ -113,13 +117,16 @@ class Box:
         return f"{self.cls} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}"
 
 
-def color_mask(hsv: np.ndarray, name: str, v_floor: int | None = None, fill_holes: bool = True) -> np.ndarray:
+def color_mask(hsv: np.ndarray, name: str, v_floor: int | None = None, fill_holes: bool = True,
+               s_floor: int | None = None) -> np.ndarray:
     """Pixels of one pad color. With fill_holes the mask is closed so a pad reads as one
     blob; without it, small cans on the pad stay as holes (needed to find them)."""
     mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
     for lo, hi in HSV_RANGES[name]:
         if v_floor is not None:
             lo = (lo[0], lo[1], v_floor)
+        if s_floor is not None:
+            lo = (lo[0], s_floor, lo[2])
         mask |= cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8))
     if fill_holes:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
@@ -138,12 +145,14 @@ def detect_pads(frame: np.ndarray, args: argparse.Namespace) -> tuple[list[tuple
     tins: list[Box] = []
     min_pad = args.min_pad_area * w * h
     max_tin = args.max_tin_frac * w * h
+    neutral = (((hsv[:, :, 1] < 80) | (hsv[:, :, 2] < 60)).astype(np.uint8)) * 255
     for color in COLORS:
         mask = color_mask(hsv, color)
-        relaxed = color_mask(hsv, color, SHADOW_V_FLOOR)
+        relaxed = color_mask(hsv, color, SHADOW_V_FLOOR, s_floor=RELAXED_S_FLOOR)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for c in contours:
             area = cv2.contourArea(c)
+            grown = None
             if area >= min_pad:
                 # Cut thin bridges to blue-ish shadowed board before sizing the pad,
                 # then recover the shadowed part of the pad: darker same-hue pixels,
@@ -168,8 +177,12 @@ def detect_pads(frame: np.ndarray, args: argparse.Namespace) -> tuple[list[tuple
                         grown[labels == i] = 255
                 gc, _ = cv2.findContours(grown, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 if gc:
-                    c = max(gc, key=cv2.contourArea)
-                    area = cv2.contourArea(c)
+                    # Fragments stay disconnected (the leg lies between them): one hull over all.
+                    c = cv2.convexHull(np.vstack(gc))
+                    grown_area = float(np.count_nonzero(grown))
+                    if area < 0.45 * grown_area:
+                        continue  # mostly relaxed pixels = a dim blotch, not a pad with a bright core
+                    area = grown_area
             if area < min_pad:
                 # Small saturated blob of a target color lying on the board or
                 # ground = a can that is not on a pad (visible if it is bright).
@@ -183,6 +196,12 @@ def detect_pads(frame: np.ndarray, args: argparse.Namespace) -> tuple[list[tuple
             hull_area = cv2.contourArea(hull)
             if hull_area <= 0:
                 continue
+            # The leg (black/grey) can lie across the pad: pixels it hides count as pad
+            # when judging how well the blob fills its hull and its box.
+            hull_fill = np.zeros_like(mask)
+            cv2.drawContours(hull_fill, [hull], -1, 255, thickness=-1)
+            occluded = hull_fill & neutral
+            area = float(np.count_nonzero((grown if grown is not None else hull_fill & mask) | occluded))
             # Convexity + circularity of the hull: partially occluded circles
             # (objects on top, image border) still pass because we use the hull.
             perim = cv2.arcLength(hull, True)
@@ -226,13 +245,17 @@ def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_ma
     radius = int(np.sqrt(np.count_nonzero(circle_mask) / np.pi))
     k = max(5, 2 * int(0.06 * radius) + 1)
     inner = cv2.erode(circle_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
-    # Not pad color, not the pad in the drone's shadow (pad hue, V 75..110), and not the
-    # grey leg (S < 80). Dark cans keep S high even when blurred at a distance.
-    pad_hue = hue_in_band(hsv, pad_color)
-    shadowed_pad = pad_hue & (hsv[:, :, 2] >= 75)
+    # Not pad color and not the grey leg (S < 80). The pad under the drone's shadow is
+    # also "not pad color" (too dark), but it is one large same-hue region, while a can
+    # of the pad's color is a small one: only large dark same-hue regions are removed.
     grey = hsv[:, :, 1] < 80
     holes = inner & cv2.bitwise_not(circle_color_mask)
-    holes[shadowed_pad | grey] = 0
+    holes[grey] = 0
+    dark_same_hue = inner & color_mask(hsv, pad_color, SHADOW_V_FLOOR, fill_holes=False, s_floor=RELAXED_S_FLOOR) & holes
+    n_lab, labels, st, _ = cv2.connectedComponentsWithStats(dark_same_hue, connectivity=8)
+    for i in range(1, n_lab):
+        if st[i, cv2.CC_STAT_AREA] >= 0.05 * circle_area_px(circle_mask):
+            holes[labels == i] = 0
     holes = cv2.morphologyEx(holes, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
     circle_area = int(np.count_nonzero(circle_mask))
     pad_hue = hue_in_band(hsv, pad_color)
@@ -244,6 +267,8 @@ def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_ma
         if area < min_area or area > max_area_frac * circle_area:
             continue
         x, y, bw, bh = cv2.boundingRect(c)
+        if x <= 1 or y <= 1 or x + bw >= hsv.shape[1] - 1 or y + bh >= hsv.shape[0] - 1:
+            continue  # touches the frame edge: the desaturated rim of a pad cut by the frame, not a can
         perim = cv2.arcLength(c, True)
         if not 0.3 <= bw / max(bh, 1) <= 3.0 or (perim > 0 and 4 * np.pi * area / (perim * perim) < 0.4):
             continue  # elongated or ragged = leg shadow / board seam crossing the pad, not a can
@@ -255,6 +280,13 @@ def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_ma
         color = tin_color(hsv, blob)
         if color is None:
             continue
+        if color == pad_color:
+            # Same hue as the pad: a dark can, or the pad's own desaturated rim near the
+            # frame edge / a sliver of shadow. Only a clearly round blob away from the edge counts.
+            circ = 4 * np.pi * area / (perim * perim) if perim > 0 else 0
+            margin = 0.02 * hsv.shape[1]
+            if circ < 0.6 or x < margin or y < margin or x + bw > hsv.shape[1] - margin or y + bh > hsv.shape[0] - margin:
+                continue
         # Pixels that are not pad-colored are the can for sure.
         distinct = (blob > 0) & ~pad_hue & (hsv[:, :, 1] >= 100)
         distinct_u8 = cv2.morphologyEx(distinct.astype(np.uint8) * 255, cv2.MORPH_OPEN,
@@ -284,6 +316,10 @@ def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_ma
             bw, bh = int(keep[:, 0].max()) - x + 1, int(keep[:, 1].max()) - y + 1
         boxes.append(Box(cls_id(color, "Tin"), x, y, x + bw, y + bh))
     return boxes
+
+
+def circle_area_px(mask: np.ndarray) -> int:
+    return int(np.count_nonzero(mask))
 
 
 def largest_component(mask: np.ndarray) -> np.ndarray:
