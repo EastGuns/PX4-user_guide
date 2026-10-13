@@ -113,15 +113,20 @@ class Box:
         return f"{self.cls} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}"
 
 
-def color_mask(hsv: np.ndarray, name: str, v_floor: int | None = None) -> np.ndarray:
+def color_mask(hsv: np.ndarray, name: str, v_floor: int | None = None, fill_holes: bool = True) -> np.ndarray:
+    """Pixels of one pad color. With fill_holes the mask is closed so a pad reads as one
+    blob; without it, small cans on the pad stay as holes (needed to find them)."""
     mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
     for lo, hi in HSV_RANGES[name]:
         if v_floor is not None:
             lo = (lo[0], lo[1], v_floor)
         mask |= cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8))
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    if fill_holes:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    else:
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
     return mask
 
 
@@ -153,6 +158,14 @@ def detect_pads(frame: np.ndarray, args: argparse.Namespace) -> tuple[list[tuple
                 region = np.zeros_like(mask)
                 cv2.circle(region, (int(ex), int(ey)), int(er * 1.05), 255, thickness=-1)
                 grown = largest_component((relaxed & region) | core)
+                # The drone's leg can cut a pad in two: pull in same-color fragments
+                # that sit just outside the seed's enclosing circle (no bridge needed).
+                near = np.zeros_like(mask)
+                cv2.circle(near, (int(ex), int(ey)), int(er * 1.3), 255, thickness=-1)
+                n_lab, labels, st, _ = cv2.connectedComponentsWithStats(relaxed & near, connectivity=8)
+                for i in range(1, n_lab):
+                    if st[i, cv2.CC_STAT_AREA] >= 0.02 * area and not np.any(grown[labels == i]):
+                        grown[labels == i] = 255
                 gc, _ = cv2.findContours(grown, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 if gc:
                     c = max(gc, key=cv2.contourArea)
@@ -180,6 +193,9 @@ def detect_pads(frame: np.ndarray, args: argparse.Namespace) -> tuple[list[tuple
             # A circle cut by the frame edge is less round; relax (not drop) the test.
             need = args.min_circularity * (0.75 if touches_border else 1.0)
             if circularity < need or solidity < 0.80:
+                continue
+            # A disc fills ~78 % of its box; a blotch that passed the hull tests fills far less.
+            if area / float(bw * bh) < 0.55:
                 continue
             filled = np.zeros_like(mask)
             cv2.drawContours(filled, [hull], -1, 255, thickness=-1)
@@ -210,7 +226,13 @@ def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_ma
     radius = int(np.sqrt(np.count_nonzero(circle_mask) / np.pi))
     k = max(5, 2 * int(0.06 * radius) + 1)
     inner = cv2.erode(circle_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
-    holes = cv2.bitwise_and(inner, cv2.bitwise_not(circle_color_mask))
+    # Not pad color, not the pad in the drone's shadow (pad hue, V 75..110), and not the
+    # grey leg (S < 80). Dark cans keep S high even when blurred at a distance.
+    pad_hue = hue_in_band(hsv, pad_color)
+    shadowed_pad = pad_hue & (hsv[:, :, 2] >= 75)
+    grey = hsv[:, :, 1] < 80
+    holes = inner & cv2.bitwise_not(circle_color_mask)
+    holes[shadowed_pad | grey] = 0
     holes = cv2.morphologyEx(holes, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
     circle_area = int(np.count_nonzero(circle_mask))
     pad_hue = hue_in_band(hsv, pad_color)
@@ -297,6 +319,19 @@ class ShadowEstimate:
         return np.array([self.vx / norm, self.vy / norm], np.float32)
 
 
+def drop_nested_pads(pads: list[tuple[Box, np.ndarray]]) -> list[tuple[Box, np.ndarray]]:
+    """A small 'pad' whose center lies on a bigger pad is a can seen up close; the tin pass labels it."""
+    keep = []
+    for box, filled in pads:
+        cx, cy = (box.x1 + box.x2) // 2, (box.y1 + box.y2) // 2
+        area = (box.x2 - box.x1) * (box.y2 - box.y1)
+        nested = any(o is not box and of[cy, cx] > 0 and area < 0.3 * (o.x2 - o.x1) * (o.y2 - o.y1)
+                     for o, of in pads)
+        if not nested:
+            keep.append((box, filled))
+    return keep
+
+
 def merge_pads(pads: list[tuple[Box, np.ndarray]]) -> list[tuple[Box, np.ndarray]]:
     """Union same-color pad fragments whose boxes overlap or nearly touch (a pad split by a leg shadow)."""
     merged: list[tuple[Box, np.ndarray]] = []
@@ -314,32 +349,36 @@ def merge_pads(pads: list[tuple[Box, np.ndarray]]) -> list[tuple[Box, np.ndarray
     return merged
 
 
-def apply_masks(frame: np.ndarray, masks: list[tuple[float, float, float, float]]) -> np.ndarray:
-    """Black out fixed obstructions (e.g. landing gear in the corners) before detection."""
-    if not masks:
-        return frame
-    h, w = frame.shape[:2]
-    frame = frame.copy()
+def mask_coverage(box: Box, masks: list[tuple[float, float, float, float]],
+                  auto_mask: np.ndarray | None, w: int, h: int) -> float:
+    """Fraction of the box that lies inside ignored regions (manual rectangles + auto mask)."""
+    region = np.zeros((h, w), np.uint8)
     for x1, y1, x2, y2 in masks:
-        frame[int(y1 * h):int(y2 * h), int(x1 * w):int(x2 * w)] = 0
-    return frame
+        region[int(y1 * h):int(y2 * h), int(x1 * w):int(x2 * w)] = 255
+    if auto_mask is not None:
+        region |= auto_mask
+    sub = region[box.y1:box.y2, box.x1:box.x2]
+    return float(np.count_nonzero(sub)) / max(sub.size, 1)
 
 
 def label_frame(frame: np.ndarray, args: argparse.Namespace, shadow: ShadowEstimate,
                 auto_mask: np.ndarray | None = None) -> list[Box]:
-    frame = apply_masks(frame, args.mask)
-    if auto_mask is not None:
-        frame = frame.copy()
-        frame[auto_mask > 0] = 0
+    h, w = frame.shape[:2]
     hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5, 5), 0), cv2.COLOR_BGR2HSV)
     pads, free_tins = detect_pads(frame, args)
     pads = merge_pads(pads)
+    pads = drop_nested_pads(pads)
+    # A detection that sits mostly inside an ignored region (landing gear in a top corner)
+    # is dropped; a pad that merely reaches into the corner keeps its whole box.
+    if args.mask or auto_mask is not None:
+        pads = [(b, f) for b, f in pads if mask_coverage(b, args.mask, auto_mask, w, h) < 0.7]
+        free_tins = [t for t in free_tins if mask_coverage(t, args.mask, auto_mask, w, h) < 0.7]
     boxes: list[Box] = []
     for box, filled in pads:
         boxes.append(box)
         if args.tins:
             pad_color = CLASSES[box.cls].split("_")[0]
-            cmask = color_mask(hsv, pad_color)
+            cmask = color_mask(hsv, pad_color, fill_holes=False)
             boxes.extend(detect_tins_on_pad(hsv, filled, cmask, pad_color, args.min_tin_area,
                                             args.max_tin_frac_pad, shadow))
     if args.free_tins:
