@@ -52,17 +52,22 @@ CLASSES = [
 COLORS = ("Red", "Green", "Blue")
 
 # HSV ranges (OpenCV scale: H 0-179, S 0-255, V 0-255). Red wraps around 0.
-# The pads are fully saturated paint (S ~ 255), while pavers, shadows and the
-# grey board stay below S ~ 225 and V ~ 120, so high S/V floors reject them.
+# The pads are fully saturated paint (S >= 244, even in shadow), while pavers,
+# blue-ish stains on the board and shadows stay below S ~ 220, so a high S
+# floor rejects them.
 # A pad in the drone's shadow drops to V ~ 80, so once a pad is found with the
 # strict floor its shadowed part is recovered with SHADOW_V_FLOOR, but only
 # inside the pad's own enclosing circle (the shadowed board is blue-ish too).
 HSV_RANGES = {
-    "Red": [((0, 200, 110), (8, 255, 255)), ((170, 200, 110), (179, 255, 255))],
-    "Green": [((45, 200, 110), (80, 255, 255))],
-    "Blue": [((100, 200, 110), (130, 255, 255))],
+    "Red": [((0, 235, 110), (8, 255, 255)), ((170, 235, 110), (179, 255, 255))],
+    "Green": [((45, 235, 110), (80, 255, 255))],
+    "Blue": [((100, 235, 110), (130, 255, 255))],
 }
 SHADOW_V_FLOOR = 60
+
+# The landing gear is red and pokes into the top corners when the camera tilts.
+# The persistent part is also auto-masked (static_color_mask); this covers the rest.
+DEFAULT_MASK = ("0,0,0.1,0.2", "0.9,0,1,0.2")
 
 # Hue bands used to name a tin from its pixels (no V floor: dark/shaded cans).
 TIN_HUE = {"Red": [(0, 12), (165, 179)], "Green": [(40, 90), ], "Blue": [(95, 135)]}
@@ -174,8 +179,7 @@ def detect_pads(frame: np.ndarray, args: argparse.Namespace) -> tuple[list[tuple
             touches_border = x <= 1 or y <= 1 or x + bw >= w - 1 or y + bh >= h - 1
             # A circle cut by the frame edge is less round; relax (not drop) the test.
             need = args.min_circularity * (0.75 if touches_border else 1.0)
-            # Solidity a little lenient: the drone's leg can carve a bite out of the pad.
-            if circularity < need or solidity < 0.75:
+            if circularity < need or solidity < 0.80:
                 continue
             filled = np.zeros_like(mask)
             cv2.drawContours(filled, [hull], -1, 255, thickness=-1)
@@ -321,8 +325,12 @@ def apply_masks(frame: np.ndarray, masks: list[tuple[float, float, float, float]
     return frame
 
 
-def label_frame(frame: np.ndarray, args: argparse.Namespace, shadow: ShadowEstimate) -> list[Box]:
+def label_frame(frame: np.ndarray, args: argparse.Namespace, shadow: ShadowEstimate,
+                auto_mask: np.ndarray | None = None) -> list[Box]:
     frame = apply_masks(frame, args.mask)
+    if auto_mask is not None:
+        frame = frame.copy()
+        frame[auto_mask > 0] = 0
     hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5, 5), 0), cv2.COLOR_BGR2HSV)
     pads, free_tins = detect_pads(frame, args)
     pads = merge_pads(pads)
@@ -367,6 +375,38 @@ def iter_videos(inputs: list[str]):
             print(f"skip (not a video): {p}", file=sys.stderr)
 
 
+def static_color_mask(video: Path, step: int, max_frames: int = 60) -> np.ndarray | None:
+    """Pixels that are pad-colored in most sampled frames belong to the airframe
+    (red landing gear in the corners), not to the ground: the ground moves."""
+    cap = cv2.VideoCapture(str(video))
+    if not cap.isOpened():
+        return None
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    stride = max(step, total // max_frames if total else step)
+    acc = None
+    n = 0
+    idx = 0
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        if idx % stride == 0:
+            hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5, 5), 0), cv2.COLOR_BGR2HSV)
+            any_color = np.zeros(hsv.shape[:2], np.uint8)
+            for color in COLORS:
+                any_color |= color_mask(hsv, color)
+            acc = (any_color > 0).astype(np.float32) if acc is None else acc + (any_color > 0)
+            n += 1
+        idx += 1
+    cap.release()
+    if acc is None or n < 5:
+        return None
+    static = ((acc / n) >= 0.5).astype(np.uint8) * 255
+    if not np.count_nonzero(static):
+        return None
+    return cv2.dilate(static, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31)))
+
+
 def process_video(video: Path, args: argparse.Namespace) -> dict:
     cap = cv2.VideoCapture(str(video))
     if not cap.isOpened():
@@ -374,6 +414,7 @@ def process_video(video: Path, args: argparse.Namespace) -> dict:
         return {"video": str(video), "error": "cannot open"}
     src_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     step = max(1, int(round(src_fps / args.fps))) if args.fps > 0 else 1
+    auto_mask = None if args.no_auto_mask else static_color_mask(video, step)
     out = Path(args.out)
     (out / "images").mkdir(parents=True, exist_ok=True)
     (out / "labels").mkdir(parents=True, exist_ok=True)
@@ -381,7 +422,8 @@ def process_video(video: Path, args: argparse.Namespace) -> dict:
         (out / "preview").mkdir(parents=True, exist_ok=True)
 
     stats = {"video": str(video), "frames_seen": 0, "frames_written": 0, "boxes": 0,
-             "per_class": {c: 0 for c in CLASSES}}
+             "per_class": {c: 0 for c in CLASSES},
+             "auto_mask_frac": 0.0 if auto_mask is None else round(float(np.count_nonzero(auto_mask)) / auto_mask.size, 4)}
     shadow = ShadowEstimate()
     idx = 0
     while True:
@@ -390,7 +432,7 @@ def process_video(video: Path, args: argparse.Namespace) -> dict:
             break
         if idx % step == 0:
             stats["frames_seen"] += 1
-            boxes = label_frame(frame, args, shadow)
+            boxes = label_frame(frame, args, shadow, auto_mask)
             if boxes or args.keep_empty:
                 stem = f"{video.stem}_{idx:06d}"
                 h, w = frame.shape[:2]
@@ -418,8 +460,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="also label cans NOT on a pad (small saturated blobs). Off by default: red pavers in sunlight get labeled Red_Tin")
     ap.add_argument("--preview", action="store_true", help="write annotated preview images for QA")
     ap.add_argument("--keep-empty", action="store_true", help="also write frames with no detections")
-    ap.add_argument("--mask", nargs="*", default=[], metavar="X1,Y1,X2,Y2",
-                    help="normalized rectangles to ignore, e.g. landing gear: --mask 0,0,0.1,0.1 0.9,0,1,0.1")
+    ap.add_argument("--no-auto-mask", action="store_true",
+                    help="do not auto-detect static airframe parts (landing gear) that stay pad-colored across frames")
+    ap.add_argument("--mask", nargs="*", default=list(DEFAULT_MASK), metavar="X1,Y1,X2,Y2",
+                    help="normalized rectangles to ignore. Default: the two top corners, where the landing "
+                         "gear shows (%(default)s). Pass 'none' to disable")
     ap.add_argument("--min-pad-area", type=float, default=0.002,
                     help="min pad (Rag) area as fraction of the frame (default 0.002)")
     ap.add_argument("--min-circularity", type=float, default=0.6)
@@ -429,6 +474,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-tin-frac", type=float, default=0.004,
                     help="max area of a tin not on a pad, as fraction of the frame")
     args = ap.parse_args(argv)
+    if args.mask == ["none"]:
+        args.mask = []
     try:
         args.mask = [tuple(float(v) for v in m.split(",")) for m in args.mask]
         assert all(len(m) == 4 for m in args.mask)
