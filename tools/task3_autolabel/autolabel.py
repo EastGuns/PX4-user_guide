@@ -68,18 +68,22 @@ def cls_id(color: str, kind: str) -> int:
 
 
 def tin_color(hsv: np.ndarray, mask: np.ndarray) -> str | None:
-    """Name the can color from the median hue of its saturated pixels."""
+    """Name the can color by voting its saturated pixels into the hue bands.
+
+    A vote (not a median) because red hue wraps around 0/179: the median of
+    a red can's pixels can land in the middle of the range and read as blue.
+    """
     # Shrink the blob so the anti-aliased rim of the pad does not vote.
     core = cv2.erode(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
     px = hsv[core > 0] if np.count_nonzero(core) >= 10 else hsv[mask > 0]
     px = px[px[:, 1] >= 100]
     if len(px) < 10:
         return None
-    hue = float(np.median(px[:, 0]))
-    for color, bands in TIN_HUE.items():
-        if any(lo <= hue <= hi for lo, hi in bands):
-            return color
-    return None
+    hue = px[:, 0]
+    votes = {color: int(sum(((hue >= lo) & (hue <= hi)).sum() for lo, hi in bands))
+             for color, bands in TIN_HUE.items()}
+    color, n = max(votes.items(), key=lambda kv: kv[1])
+    return color if n >= 0.4 * len(px) else None
 
 
 @dataclass
@@ -152,9 +156,25 @@ def detect_pads(frame: np.ndarray, args: argparse.Namespace) -> tuple[list[tuple
     return pads, tins
 
 
+def hue_in_band(hsv: np.ndarray, color: str) -> np.ndarray:
+    h = hsv[:, :, 0]
+    m = np.zeros(h.shape, bool)
+    for lo, hi in TIN_HUE[color]:
+        m |= (h >= lo) & (h <= hi)
+    return m
+
+
 def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_mask: np.ndarray,
-                       min_area: int, max_area_frac: float) -> list[Box]:
-    """Tins on a pad = regions inside the pad hull that are NOT the pad color."""
+                       pad_color: str, min_area: int, max_area_frac: float,
+                       shadow: "ShadowEstimate") -> list[Box]:
+    """Tins on a pad = regions inside the pad hull that are NOT the pad color.
+
+    A can casts a shadow on the pad, and the shadow is as dark as a dark can,
+    so the hole is can + shadow. Pixels whose hue differs from the pad's are
+    certainly the can; the rest (pad hue, dark) is shadow unless the can has
+    the pad's color. For a same-color can the shadow direction learned from
+    the other cans in this video says which end of the hole is the can.
+    """
     # Erode by ~6 % of the circle radius so the rim and anti-aliased edge are ignored.
     radius = int(np.sqrt(np.count_nonzero(circle_mask) / np.pi))
     k = max(5, 2 * int(0.06 * radius) + 1)
@@ -162,26 +182,88 @@ def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_ma
     holes = cv2.bitwise_and(inner, cv2.bitwise_not(circle_color_mask))
     holes = cv2.morphologyEx(holes, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
     circle_area = int(np.count_nonzero(circle_mask))
+    pad_hue = hue_in_band(hsv, pad_color)
     contours, _ = cv2.findContours(holes, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     boxes = []
+    deferred = []   # same-color cans, resolved once the shadow direction is known
     for c in contours:
         area = cv2.contourArea(c)
         if area < min_area or area > max_area_frac * circle_area:
             continue
         x, y, bw, bh = cv2.boundingRect(c)
         perim = cv2.arcLength(c, True)
-        if not 0.4 <= bw / max(bh, 1) <= 2.5 or (perim > 0 and 4 * np.pi * area / (perim * perim) < 0.5):
+        if not 0.3 <= bw / max(bh, 1) <= 3.0 or (perim > 0 and 4 * np.pi * area / (perim * perim) < 0.4):
             continue  # elongated or ragged = leg shadow / board seam crossing the pad, not a can
         blob = np.zeros_like(holes)
         cv2.drawContours(blob, [c], -1, 255, thickness=-1)
         ring = cv2.dilate(blob, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))) & ~inner
-        if np.count_nonzero(ring) > 0.15 * cv2.arcLength(c, True):
+        if np.count_nonzero(ring) > 0.15 * perim:
             continue  # hole touches the pad rim = cut-off edge, not a can
         color = tin_color(hsv, blob)
         if color is None:
             continue
+        # Pixels that are not pad-colored are the can for sure.
+        distinct = (blob > 0) & ~pad_hue & (hsv[:, :, 1] >= 100)
+        distinct_u8 = cv2.morphologyEx(distinct.astype(np.uint8) * 255, cv2.MORPH_OPEN,
+                                       cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+        n_distinct = int(np.count_nonzero(distinct_u8))
+        if color != pad_color and n_distinct >= max(min_area // 2, 10):
+            can = largest_component(distinct_u8)
+            rest = (blob > 0) & (can == 0)
+            cy_c, cx_c = np.argwhere(can > 0).mean(axis=0)
+            if np.count_nonzero(rest) >= 0.3 * np.count_nonzero(can):
+                ry, rx = np.argwhere(rest).mean(axis=0)
+                shadow.add(rx - cx_c, ry - cy_c)
+            x, y, bw, bh = cv2.boundingRect(can)
+            boxes.append(Box(cls_id(color, "Tin"), x, y, x + bw, y + bh))
+        else:
+            deferred.append((color, blob))
+    for color, blob in deferred:
+        x, y, bw, bh = cv2.boundingRect(blob)
+        d = shadow.direction()
+        if d is not None and max(bw, bh) > 1.25 * min(bw, bh):
+            # Keep the end of the blob that faces away from the shadow, one can-width long.
+            pts = np.argwhere(blob > 0)[:, ::-1].astype(np.float32)        # (x, y)
+            proj = pts @ d
+            side = float(min(bw, bh))
+            keep = pts[proj <= proj.min() + side]
+            x, y = int(keep[:, 0].min()), int(keep[:, 1].min())
+            bw, bh = int(keep[:, 0].max()) - x + 1, int(keep[:, 1].max()) - y + 1
         boxes.append(Box(cls_id(color, "Tin"), x, y, x + bw, y + bh))
     return boxes
+
+
+def largest_component(mask: np.ndarray) -> np.ndarray:
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if n <= 1:
+        return mask
+    best = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    return (labels == best).astype(np.uint8) * 255
+
+
+class ShadowEstimate:
+    """Running unit vector from a can to its shadow (constant within a video: one sun)."""
+
+    def __init__(self) -> None:
+        self.vx = 0.0
+        self.vy = 0.0
+        self.n = 0
+
+    def add(self, dx: float, dy: float) -> None:
+        norm = float(np.hypot(dx, dy))
+        if norm < 1e-6:
+            return
+        # Exponential average so a long video follows a slowly moving sun.
+        w = 0.1 if self.n else 1.0
+        self.vx = (1 - w) * self.vx + w * dx / norm
+        self.vy = (1 - w) * self.vy + w * dy / norm
+        self.n += 1
+
+    def direction(self) -> np.ndarray | None:
+        norm = float(np.hypot(self.vx, self.vy))
+        if self.n == 0 or norm < 0.3:
+            return None
+        return np.array([self.vx / norm, self.vy / norm], np.float32)
 
 
 def merge_pads(pads: list[tuple[Box, np.ndarray]]) -> list[tuple[Box, np.ndarray]]:
@@ -212,7 +294,7 @@ def apply_masks(frame: np.ndarray, masks: list[tuple[float, float, float, float]
     return frame
 
 
-def label_frame(frame: np.ndarray, args: argparse.Namespace) -> list[Box]:
+def label_frame(frame: np.ndarray, args: argparse.Namespace, shadow: ShadowEstimate) -> list[Box]:
     frame = apply_masks(frame, args.mask)
     hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5, 5), 0), cv2.COLOR_BGR2HSV)
     pads, free_tins = detect_pads(frame, args)
@@ -221,8 +303,10 @@ def label_frame(frame: np.ndarray, args: argparse.Namespace) -> list[Box]:
     for box, filled in pads:
         boxes.append(box)
         if args.tins:
-            cmask = color_mask(hsv, CLASSES[box.cls].split("_")[0])
-            boxes.extend(detect_tins_on_pad(hsv, filled, cmask, args.min_tin_area, args.max_tin_frac_pad))
+            pad_color = CLASSES[box.cls].split("_")[0]
+            cmask = color_mask(hsv, pad_color)
+            boxes.extend(detect_tins_on_pad(hsv, filled, cmask, pad_color, args.min_tin_area,
+                                            args.max_tin_frac_pad, shadow))
     if args.free_tins:
         pad_union = np.zeros(frame.shape[:2], np.uint8)
         for _, filled in pads:
@@ -271,6 +355,7 @@ def process_video(video: Path, args: argparse.Namespace) -> dict:
 
     stats = {"video": str(video), "frames_seen": 0, "frames_written": 0, "boxes": 0,
              "per_class": {c: 0 for c in CLASSES}}
+    shadow = ShadowEstimate()
     idx = 0
     while True:
         ok, frame = cap.read()
@@ -278,7 +363,7 @@ def process_video(video: Path, args: argparse.Namespace) -> dict:
             break
         if idx % step == 0:
             stats["frames_seen"] += 1
-            boxes = label_frame(frame, args)
+            boxes = label_frame(frame, args, shadow)
             if boxes or args.keep_empty:
                 stem = f"{video.stem}_{idx:06d}"
                 h, w = frame.shape[:2]
