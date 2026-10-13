@@ -140,8 +140,8 @@ def color_mask(hsv: np.ndarray, name: str, v_floor: int | None = None, fill_hole
     return mask
 
 
-def detect_pads(frame: np.ndarray, args: argparse.Namespace,
-                ignore: np.ndarray | None = None) -> tuple[list[tuple[Box, np.ndarray]], list[Box]]:
+def detect_pads(frame: np.ndarray, args: argparse.Namespace, ignore: np.ndarray | None = None,
+                gear_colors: set[str] | None = None) -> tuple[list[tuple[Box, np.ndarray]], list[Box]]:
     """Return ([(pad_box, filled_mask)], [free-standing tin boxes]).
 
     `ignore` marks regions holding the airframe (corner masks + auto mask): pixels
@@ -159,8 +159,8 @@ def detect_pads(frame: np.ndarray, args: argparse.Namespace,
     for color in COLORS:
         mask = color_mask(hsv, color)
         relaxed = color_mask(hsv, color, SHADOW_V_FLOOR, s_floor=RELAXED_S_FLOOR)
-        if ignore is not None:
-            relaxed[ignore > 0] = 0
+        if ignore is not None and (not gear_colors or color in gear_colors):
+            relaxed[ignore > 0] = 0   # a green pad fragment under the red foot is still pad
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for c in contours:
             area = cv2.contourArea(c)
@@ -175,7 +175,15 @@ def detect_pads(frame: np.ndarray, args: argparse.Namespace,
                 core = cv2.morphologyEx(blob, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
                 core = largest_component(core) if np.count_nonzero(core) else blob
                 cc, _ = cv2.findContours(core, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                (ex, ey), er = cv2.minEnclosingCircle(max(cc, key=cv2.contourArea) if cc else c)
+                seed = max(cc, key=cv2.contourArea) if cc else c
+                (ex, ey), er = cv2.minEnclosingCircle(seed)
+                sx, sy, sw, sh = cv2.boundingRect(seed)
+                if sx <= 1 or sy <= 1 or sx + sw >= w - 1 or sy + sh >= h - 1:
+                    # Cut by the frame edge: the enclosing circle of the visible part is
+                    # too small, so take the circle its outline actually lies on.
+                    fit = fit_circle(cv2.convexHull(seed), w, h)
+                    if fit is not None and fit[3] <= 0.04 and fit[2] <= max(w, h):
+                        ex, ey, er = fit[:3]
                 region = np.zeros_like(mask)
                 cv2.circle(region, (int(ex), int(ey)), int(er * 1.05), 255, thickness=-1)
                 grown = largest_component((relaxed & region) | core)
@@ -375,8 +383,20 @@ def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_ma
         # the leg counts: next to the leg a dark half-disc may be the shadow of a hidden
         # can. Inside a shadow region the blob must also be solid, since shadow gradients
         # make ragged blobs.
-        touches_leg = np.count_nonzero((dilated > 0) & leg)
-        if circ < 0.6 or touches_leg > 0.1 * perim or (in_shadow and solidity < 0.8):
+        contact = (dilated > 0) & leg
+        touches_leg = int(np.count_nonzero(contact))
+        if touches_leg > 0.1 * perim:
+            # A dark blob against the leg on the side the shadows fall to may be the
+            # shadow of a can hidden behind the leg; on the sunward side it is a can.
+            d = shadow.direction()
+            if d is None:
+                continue
+            cy_b, cx_b = np.argwhere(blob > 0).mean(axis=0)
+            cy_l, cx_l = np.argwhere(contact).mean(axis=0)
+            to_leg = np.array([cx_l - cx_b, cy_l - cy_b], np.float32)
+            if float(to_leg @ d) < 0.5 * float(np.hypot(*to_leg)):
+                continue  # the leg is not in the shadow direction: blob sits on the shadow side
+        if circ < 0.6 or (in_shadow and solidity < 0.8):
             continue
         deferred.append((color, blob))
     for color, blob in deferred:
@@ -418,9 +438,9 @@ def distinct_components(mask: np.ndarray, min_area: int, rim: np.ndarray) -> lis
     return parts
 
 
-def circular_segment(hull: np.ndarray, bw: int, bh: int, w: int, h: int) -> bool:
-    """Is this hull (cut by the frame edge) a segment of a circle? Fit a circle to the
-    hull outline away from the frame edge and check the fit and the segment's thickness."""
+def fit_circle(hull: np.ndarray, w: int, h: int) -> tuple[float, float, float, float] | None:
+    """Least-squares circle through the hull outline, ignoring points on the frame edge.
+    Returns (cx, cy, r, rms residual / r), or None when there is too little outline."""
     outline = np.zeros((h, w), np.uint8)
     cv2.drawContours(outline, [hull], -1, 255, 1)
     outline[:3, :] = 0
@@ -429,16 +449,26 @@ def circular_segment(hull: np.ndarray, bw: int, bh: int, w: int, h: int) -> bool
     outline[:, -3:] = 0
     pts = np.argwhere(outline > 0)[:, ::-1].astype(np.float64)   # (x, y)
     if len(pts) < 30:
-        return False
+        return None
     x, y = pts[:, 0], pts[:, 1]
     a = np.column_stack([x, y, np.ones_like(x)])
     sol, *_ = np.linalg.lstsq(a, -(x * x + y * y), rcond=None)
     cx, cy = -sol[0] / 2, -sol[1] / 2
     r2 = cx * cx + cy * cy - sol[2]
     if r2 <= 0:
-        return False
+        return None
     r = float(np.sqrt(r2))
     residual = float(np.sqrt(np.mean((np.hypot(x - cx, y - cy) - r) ** 2))) / r
+    return float(cx), float(cy), r, residual
+
+
+def circular_segment(hull: np.ndarray, bw: int, bh: int, w: int, h: int) -> bool:
+    """Is this hull (cut by the frame edge) a segment of a circle? Fit a circle to the
+    hull outline away from the frame edge and check the fit and the segment's thickness."""
+    fit = fit_circle(hull, w, h)
+    if fit is None:
+        return False
+    r, residual = fit[2], fit[3]
     # A plausible pad: radius no larger than the frame, and the visible segment at least
     # 12 % of the radius thick (a hairline sliver at the edge is not worth a label).
     return residual <= 0.04 and r <= max(w, h) and min(bw, bh) >= 0.12 * r
@@ -533,7 +563,7 @@ def label_frame(frame: np.ndarray, args: argparse.Namespace, shadow: ShadowEstim
     h, w = frame.shape[:2]
     hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5, 5), 0), cv2.COLOR_BGR2HSV)
     ignore = ignore_region(args.mask, auto_mask, w, h) if (args.mask or auto_mask is not None) else None
-    pads, free_tins = detect_pads(frame, args, ignore)
+    pads, free_tins = detect_pads(frame, args, ignore, gear_colors)
     # A detection that sits mostly inside an ignored region (landing gear in a top corner)
     # is dropped; a pad that merely reaches into the corner keeps its whole box. This
     # comes before merging, or the gear foot next to a red pad would be merged into it.
