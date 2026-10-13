@@ -75,6 +75,9 @@ DEFAULT_MASK = ("0,0,0.15,0.2", "0.85,0,1,0.2")
 # The gear foot covers at most ~1 % of the frame (it is a fixed part of the airframe);
 # a pad-colored blob in a masked corner that is larger than this is a pad.
 GEAR_MAX_FRAC = 0.02
+# The landing legs are black strips that run in from the frame border and end at a foot.
+LEG_V_MAX = 40          # a leg pixel is darker than this (V)
+LEG_MIN_FRAC = 0.003    # a leg is a dark component of at least this fraction of the frame
 
 # Hue bands used to name a tin from its pixels (no V floor: dark/shaded cans).
 TIN_HUE = {"Red": [(0, 12), (165, 179)], "Green": [(40, 90), ], "Blue": [(95, 135)]}
@@ -558,6 +561,47 @@ def mask_coverage(box: Box, region: np.ndarray) -> float:
     return float(np.count_nonzero(sub)) / max(sub.size, 1)
 
 
+def leg_mask(hsv: np.ndarray) -> np.ndarray:
+    """Pixels of the landing legs: big black components that touch the frame border."""
+    h, w = hsv.shape[:2]
+    dark = (hsv[..., 2] < LEG_V_MAX).astype(np.uint8)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(dark, connectivity=8)
+    keep = np.zeros(n, bool)
+    for i in range(1, n):
+        x, y, bw, bh, area = (int(v) for v in st[i])
+        if area >= LEG_MIN_FRAC * w * h and (x == 0 or y == 0 or x + bw >= w or y + bh >= h):
+            keep[i] = True
+    return keep[lab]
+
+
+def ends_leg(filled: np.ndarray, leg: np.ndarray) -> bool:
+    """True when a leg ends at this blob: the blob touches leg pixels along a good part
+    of its outline, and the leg around it lies on one side of the blob only (a pad the
+    leg crosses has leg on both sides)."""
+    h, w = filled.shape
+    ys, xs = np.nonzero(filled)
+    if not len(xs):
+        return False
+    ring = (cv2.dilate(filled, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))) > 0) & (filled == 0)
+    contours, _ = cv2.findContours(filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    perimeter = sum(len(c) for c in contours)
+    if np.count_nonzero(ring & leg) < 0.3 * perimeter:
+        return False
+    x1, x2, y1, y2 = int(xs.min()), int(xs.max()) + 1, int(ys.min()), int(ys.max()) + 1
+    m = max(x2 - x1, y2 - y1)
+    X1, X2, Y1, Y2 = max(0, x1 - m), min(w, x2 + m), max(0, y1 - m), min(h, y2 + m)
+    ly, lx = np.nonzero(leg[Y1:Y2, X1:X2])
+    if len(lx) < 300:
+        return False
+    pts = np.stack([lx + X1, ly + Y1], axis=1).astype(np.float32)
+    mean = pts.mean(axis=0)
+    evals, evecs = np.linalg.eigh(np.cov((pts - mean).T))
+    axis = evecs[:, int(np.argmax(evals))]
+    proj = (pts - mean) @ axis
+    center = float((np.array([xs.mean(), ys.mean()], np.float32) - mean) @ axis)
+    return min(float((proj > center).mean()), float((proj < center).mean())) <= 0.1
+
+
 def label_frame(frame: np.ndarray, args: argparse.Namespace, shadow: ShadowEstimate,
                 auto_mask: np.ndarray | None = None, gear_colors: set[str] | None = None) -> list[Box]:
     h, w = frame.shape[:2]
@@ -573,13 +617,22 @@ def label_frame(frame: np.ndarray, args: argparse.Namespace, shadow: ShadowEstim
     # is a pad as well.
     if ignore is not None:
         gear_max = GEAR_MAX_FRAC * w * h
+        leg = leg_mask(hsv) if pads else None
 
-        def is_gear(box: Box, px: int) -> bool:
+        def is_gear(box: Box, px: int, filled: np.ndarray | None = None) -> bool:
             color = CLASSES[box.cls].split("_")[0]
-            return (mask_coverage(box, ignore) >= 0.7 and px < gear_max
-                    and (not gear_colors or color in gear_colors))
+            if gear_colors and color not in gear_colors:
+                return False
+            cov = mask_coverage(box, ignore)
+            if cov >= 0.7 and px < gear_max:
+                return True
+            # A foot that swung out of its corner (the legs sway in flight): a small blob
+            # of the gear color that still reaches into the corner and sits where a leg
+            # ends. A pad the leg merely crosses has leg on both sides of it.
+            return (filled is not None and leg is not None and cov >= 0.3
+                    and px < 0.5 * gear_max and ends_leg(filled, leg))
 
-        pads = [(b, f) for b, f in pads if not is_gear(b, int(np.count_nonzero(f)))]
+        pads = [(b, f) for b, f in pads if not is_gear(b, int(np.count_nonzero(f)), f)]
         free_tins = [t for t in free_tins if not is_gear(t, (t.x2 - t.x1) * (t.y2 - t.y1))]
     pads = merge_pads(pads)
     pads = drop_nested_pads(pads)
