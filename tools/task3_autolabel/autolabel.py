@@ -78,6 +78,10 @@ GEAR_MAX_FRAC = 0.02
 # The landing legs are black strips that run in from the frame border and end at a foot.
 LEG_V_MAX = 40          # a leg pixel is darker than this (V)
 LEG_MIN_FRAC = 0.003    # a leg is a dark component of at least this fraction of the frame
+SAME_COLOR_V_MAX = 0.45  # a can of the pad's own color is at most this bright, relative to the paint
+TIN_S_MIN = 200          # cans are saturated paint like the pads; a sheen on the black leg is not
+TIN_V_MIN = 6            # below this a pixel is black; beside the leg its hue is noise (the leg reads as blue)
+LEG_SMEAR_PX = 5         # the off-hue band the video codec smears along the leg's edge is at most this wide
 
 # Hue bands used to name a tin from its pixels (no V floor: dark/shaded cans).
 TIN_HUE = {"Red": [(0, 12), (165, 179)], "Green": [(40, 90), ], "Blue": [(95, 135)]}
@@ -87,17 +91,21 @@ def cls_id(color: str, kind: str) -> int:
     return CLASSES.index(f"{color}_{kind}")
 
 
-def tin_color(hsv: np.ndarray, mask: np.ndarray) -> str | None:
+def tin_color(hsv: np.ndarray, mask: np.ndarray, by_leg: bool = False) -> str | None:
     """Name the can color by voting its saturated pixels into the hue bands.
 
     A vote (not a median) because red hue wraps around 0/179: the median of
     a red can's pixels can land in the middle of the range and read as blue.
+    Next to the landing leg (`by_leg`) black pixels do not vote: they are the
+    leg or its shadow, and their hue is noise.
     """
     # Shrink the blob so the anti-aliased rim of the pad does not vote.
     core = cv2.erode(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
     px = hsv[core > 0] if np.count_nonzero(core) >= 10 else hsv[mask > 0]
     px = px[px[:, 1] >= 100]
-    if len(px) < 10:
+    if by_leg:
+        px = px[px[:, 2] >= TIN_V_MIN]
+    if len(px) < 10 or float(np.median(px[:, 1])) < TIN_S_MIN:
         return None
     hue = px[:, 0]
     votes = {color: int(sum(((hue >= lo) & (hue <= hi)).sum() for lo, hi in bands))
@@ -159,6 +167,9 @@ def detect_pads(frame: np.ndarray, args: argparse.Namespace, ignore: np.ndarray 
     min_pad = args.min_pad_area * w * h
     max_tin = args.max_tin_frac * w * h
     neutral = (((hsv[:, :, 1] < 80) | (hsv[:, :, 2] < 60)).astype(np.uint8)) * 255
+    # A landing leg cuts a pad with a straight edge just as the frame edge does, so a
+    # pad touching a leg gets the same relaxed shape tests and circle fit.
+    leg_near = cv2.dilate(leg_mask(hsv).astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))) > 0
     for color in COLORS:
         mask = color_mask(hsv, color)
         relaxed = color_mask(hsv, color, SHADOW_V_FLOOR, s_floor=RELAXED_S_FLOOR)
@@ -181,11 +192,14 @@ def detect_pads(frame: np.ndarray, args: argparse.Namespace, ignore: np.ndarray 
                 seed = max(cc, key=cv2.contourArea) if cc else c
                 (ex, ey), er = cv2.minEnclosingCircle(seed)
                 sx, sy, sw, sh = cv2.boundingRect(seed)
-                if sx <= 1 or sy <= 1 or sx + sw >= w - 1 or sy + sh >= h - 1:
-                    # Cut by the frame edge: the enclosing circle of the visible part is
-                    # too small, so take the circle its outline actually lies on.
-                    fit = fit_circle(cv2.convexHull(seed), w, h)
-                    if fit is not None and fit[3] <= 0.04 and fit[2] <= max(w, h):
+                if (sx <= 1 or sy <= 1 or sx + sw >= w - 1 or sy + sh >= h - 1
+                        or np.any(leg_near[sy:sy + sh, sx:sx + sw] & (core[sy:sy + sh, sx:sx + sw] > 0))):
+                    # Cut by the frame edge or a leg: the enclosing circle of the visible
+                    # part is too small, so take the circle its outline actually lies on.
+                    # A short arc fits almost any huge circle: trust the fit only when its
+                    # radius is in proportion to the visible part.
+                    fit = fit_circle(cv2.convexHull(seed), w, h, leg_near)
+                    if fit is not None and fit[3] <= 0.04 and fit[2] <= min(max(w, h), 2.5 * er):
                         ex, ey, er = fit[:3]
                 region = np.zeros_like(mask)
                 cv2.circle(region, (int(ex), int(ey)), int(er * 1.05), 255, thickness=-1)
@@ -232,14 +246,15 @@ def detect_pads(frame: np.ndarray, args: argparse.Namespace, ignore: np.ndarray 
             solidity = area / hull_area
             x, y, bw, bh = cv2.boundingRect(hull)
             touches_border = x <= 1 or y <= 1 or x + bw >= w - 1 or y + bh >= h - 1
+            cut = touches_border or bool(np.any((hull_fill > 0) & leg_near))
             if solidity < 0.80:
                 continue
-            # A circle cut by the frame edge is less round; relax the test, and a thin
-            # arc at the edge (circularity far lower) passes if its outline really is
-            # a circle of a plausible radius: a paving block or a stain cut by the edge
-            # is not.
-            need = args.min_circularity * (0.75 if touches_border else 1.0)
-            if circularity < need and not (touches_border and circular_segment(hull, bw, bh, w, h)):
+            # A circle cut by the frame edge or a leg is less round; relax the test, and
+            # a thin arc at the edge (circularity far lower) passes if its outline really
+            # is a circle of a plausible radius: a paving block or a stain cut by the
+            # edge is not.
+            need = args.min_circularity * (0.75 if cut else 1.0)
+            if circularity < need and not (cut and circular_segment(hull, bw, bh, w, h, leg_near)):
                 continue
             # A disc fills ~78 % of its box; a blotch that passed the hull tests fills far less.
             if area / float(bw * bh) < 0.55:
@@ -260,7 +275,8 @@ def hue_in_band(hsv: np.ndarray, color: str) -> np.ndarray:
 
 def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_mask: np.ndarray,
                        pad_color: str, min_area: int, max_area_frac: float,
-                       shadow: "ShadowEstimate", ignore: np.ndarray | None = None) -> list[Box]:
+                       shadow: "ShadowEstimate", ignore: np.ndarray | None = None,
+                       dark_leg: np.ndarray | None = None) -> list[Box]:
     """Tins on a pad = small blobs inside the pad hull that are either of another
     hue than the pad or much darker than the pad's paint.
 
@@ -295,12 +311,20 @@ def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_ma
     for i in range(1, n_grey):
         if grey_stats[i, cv2.CC_STAT_AREA] >= 0.02 * circle_area:
             leg |= grey_labels == i
+    near_leg = None
+    if dark_leg is not None:
+        # The black leg itself, also where it runs just outside the pad's outline (the
+        # outline stops at the leg when the leg hides the rest of the pad).
+        near_leg = cv2.dilate(dark_leg.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))) > 0
+        leg |= dark_leg & (cv2.dilate(circle_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1, 2 * k + 1))) > 0)
     pad_hue = hue_in_band(hsv, pad_color)
     strict = inner & (circle_color_mask > 0)
     pad_v = float(np.median(v_ch[strict])) if np.count_nonzero(strict) >= 50 else 200.0
+    inner_full = inner
     if ignore is not None:
-        inner &= ignore == 0   # the gear foot over a pad is neither a can nor a shadow
+        inner = inner & (ignore == 0)   # the gear foot over a pad is neither a can nor a shadow
     distinct_px = inner & ~grey & ~pad_hue & (s_ch >= 100)
+    black = v_ch < TIN_V_MIN
     dark_same = inner & ~grey & pad_hue & (v_ch < 0.55 * pad_v)
     holes = ((distinct_px | dark_same).astype(np.uint8)) * 255
     # Large dark same-hue regions are the pad in shadow (drone, leg): removed, but a
@@ -323,6 +347,8 @@ def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_ma
     rim = (~inner).astype(np.uint8) * 255
     if ignore is not None:
         rim[ignore > 0] = 0
+    if near_leg is not None:
+        rim[near_leg] = 0   # a can leaning on the leg at the pad's edge is not the pad's rim
     # A can is a fixed fraction of a pad (both are real objects): a blob far smaller
     # than that is a speck of dirt, however round.
     min_area = max(min_area, int(0.003 * circle_area))
@@ -345,17 +371,28 @@ def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_ma
         solidity = area / hull_area if hull_area > 0 else 0
         blob = np.zeros(hsv.shape[:2], np.uint8)
         cv2.drawContours(blob, [c], -1, 255, thickness=-1)
+        dilated = cv2.dilate(blob, ring_kernel)
+        # Against the landing leg, black pixels are the leg or its shadow and their hue
+        # is noise (a black leg reads as blue), so there they are not another color; and
+        # the codec smears a thin band of off-hue pixels along the leg's edge (dark blue
+        # where the black leg meets a green pad), so there a can must be a solid disc,
+        # thicker than that band. Away from the leg a far can that is nearly black still
+        # shows its own hue in those pixels.
+        by_leg = bool(np.any((dilated > 0) & leg)) or (near_leg is not None and bool(np.any((blob > 0) & near_leg)))
+        other_px = distinct_px & ~black if by_leg else distinct_px
+        solid = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * LEG_SMEAR_PX + 1,) * 2) if by_leg else None
+        if ignore is not None and ignore[y + bh // 2, x + bw // 2] > 0:
+            continue   # the gear foot over a pad, or a can inside a masked corner
         if not 0.3 <= bw / max(bh, 1) <= 3.0 or circ < 0.4 or solidity < 0.5:
             # Elongated or ragged = leg shadow / board seam crossing the pad, not a can.
             # But a can of another hue glued to such a region is still a can: take the
             # compact distinct-hue components inside it on their own.
-            for part in distinct_components(((blob > 0) & distinct_px), min_area, rim):
-                color = tin_color(hsv, part)
+            for part in distinct_components(((blob > 0) & other_px), min_area, rim, solid):
+                color = tin_color(hsv, part, by_leg)
                 if color is not None and color != pad_color:
                     x, y, bw, bh = cv2.boundingRect(part)
                     boxes.append(Box(cls_id(color, "Tin"), x, y, x + bw, y + bh))
             continue
-        dilated = cv2.dilate(blob, ring_kernel)
         # A hole touching the pad's rim is the pad's own cut-off edge, not a can. The
         # frame edge is not a rim (inner reaches it), and neither is the gear foot's
         # outline (a can half hidden under the foot is still a can).
@@ -363,13 +400,31 @@ def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_ma
             continue
         # Pixels that are not pad-colored are the can for sure; they also name its color
         # (a blue can half hidden by the leg is blue, however much shadow is in the blob).
-        distinct_u8 = cv2.morphologyEx(((blob > 0) & distinct_px).astype(np.uint8) * 255, cv2.MORPH_OPEN,
+        distinct_u8 = cv2.morphologyEx(((blob > 0) & other_px).astype(np.uint8) * 255, cv2.MORPH_OPEN,
                                        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+        if solid is not None:
+            distinct_u8 = cv2.morphologyEx(distinct_u8, cv2.MORPH_OPEN, solid)
         n_distinct = int(np.count_nonzero(distinct_u8))
-        color = tin_color(hsv, distinct_u8) if n_distinct >= max(min_area // 2, 10) else None
+        # Enough of the blob must be of another hue to call it a can of that color: a few
+        # stray pixels in a dark blob are noise, and the blob is judged as same-color.
+        color = tin_color(hsv, distinct_u8, by_leg) if n_distinct >= max(min_area // 2, 10) else None
         if color is not None and color != pad_color:
             # Its visible part is the can, even when the frame edge cuts it.
-            can = largest_component(distinct_u8)
+            # Blur and opening shave a pixel off the can's edge: give it back.
+            can = cv2.dilate(largest_component(distinct_u8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))) & blob
+            if by_leg or (ignore is not None and np.any((cv2.dilate(can, ring_kernel) > 0) & (ignore > 0))):
+                # The can reaches into a masked corner, or stands by the leg where its black
+                # part and its thin edge were left out above: take its own-hue pixels there
+                # too (not the foot's or the leg's: another hue), as long as that stays
+                # can-sized (a black leg reading as blue would grow a blue can without bound).
+                own = (inner_full & ~grey & hue_in_band(hsv, color) & (s_ch >= 100)).astype(np.uint8)
+                n_own, own_labels = cv2.connectedComponents(own, connectivity=8)
+                hit = np.unique(own_labels[can > 0])
+                full = np.isin(own_labels, hit[hit > 0]).astype(np.uint8) * 255
+                fx, fy, fw, fh = cv2.boundingRect(full)
+                cx0, cy0, cw0, ch0 = cv2.boundingRect(can)
+                if fw <= 1.6 * cw0 and fh <= 1.6 * ch0:
+                    can = full
             rest = (blob > 0) & (can == 0)
             cy_c, cx_c = np.argwhere(can > 0).mean(axis=0)
             if np.count_nonzero(rest) >= 0.3 * np.count_nonzero(can):
@@ -378,7 +433,7 @@ def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_ma
             x, y, bw, bh = cv2.boundingRect(can)
             boxes.append(Box(cls_id(color, "Tin"), x, y, x + bw, y + bh))
             continue
-        color = tin_color(hsv, blob)
+        color = tin_color(hsv, blob, by_leg)
         if color is None:
             continue
         # No distinct pixels: a can of the pad's own color (dark against the paint) or a
@@ -399,28 +454,60 @@ def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_ma
             to_leg = np.array([cx_l - cx_b, cy_l - cy_b], np.float32)
             if float(to_leg @ d) < 0.5 * float(np.hypot(*to_leg)):
                 continue  # the leg is not in the shadow direction: blob sits on the shadow side
-        if circ < 0.6 or (in_shadow and solidity < 0.8):
+        if circ < 0.6 or solidity < 0.8:
             continue
+        if near_leg is not None and np.count_nonzero((blob > 0) & near_leg) >= 0.7 * np.count_nonzero(blob):
+            continue   # a dark sliver hugging the leg is the leg's shadow edge, not a can
         deferred.append((color, blob))
+    d = shadow.direction()
+    others = [(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1) for b in boxes]
+    others += [cv2.boundingRect(blob) for _, blob in deferred]
+
+    def shadow_of(rect, can) -> bool:
+        """`rect` sits right next to `can` on the side its shadow falls to."""
+        if d is None:
+            return False
+        size = max(can[2], can[3])
+        dx = (rect[0] + rect[2] / 2) - (can[0] + can[2] / 2)
+        dy = (rect[1] + rect[3] / 2) - (can[1] + can[3] / 2)
+        dist = float(np.hypot(dx, dy))
+        if dist < 1 or (dx * d[0] + dy * d[1]) < 0.6 * dist:
+            return False
+        gap_x = max(rect[0], can[0]) - min(rect[0] + rect[2], can[0] + can[2])
+        gap_y = max(rect[1], can[1]) - min(rect[1] + rect[3], can[1] + can[3])
+        return max(gap_x, gap_y) <= 0.3 * size
+
     for color, blob in deferred:
         x, y, bw, bh = cv2.boundingRect(blob)
-        d = shadow.direction()
+        me = (x, y, bw, bh)
+        # A dark same-hue blob right next to another can, on its shadow side, is that
+        # can's shadow (the two came apart when the can is cut by the frame edge).
+        if any(o != me and shadow_of(me, o) and not shadow_of(o, me) for o in others):
+            continue
+        pts = np.argwhere(blob > 0)[:, ::-1].astype(np.float32)        # (x, y)
         if d is not None and max(bw, bh) > 1.25 * min(bw, bh):
             # Keep the end of the blob that faces away from the shadow, one can-width long.
-            pts = np.argwhere(blob > 0)[:, ::-1].astype(np.float32)        # (x, y)
             proj = pts @ d
             side = float(min(bw, bh))
-            keep = pts[proj <= proj.min() + side]
-            x, y = int(keep[:, 0].min()), int(keep[:, 1].min())
-            bw, bh = int(keep[:, 0].max()) - x + 1, int(keep[:, 1].max()) - y + 1
+            pts = pts[proj <= proj.min() + side]
+            x, y = int(pts[:, 0].min()), int(pts[:, 1].min())
+            bw, bh = int(pts[:, 0].max()) - x + 1, int(pts[:, 1].max()) - y + 1
+        # The can itself must be much darker than the paint: paint in deep shadow (a
+        # pocket at the frame edge or under the drone) is about half as bright, a can far less.
+        if float(np.median(v_ch[pts[:, 1].astype(int), pts[:, 0].astype(int)])) > SAME_COLOR_V_MAX * pad_v:
+            continue
         boxes.append(Box(cls_id(color, "Tin"), x, y, x + bw, y + bh))
     return boxes
 
 
-def distinct_components(mask: np.ndarray, min_area: int, rim: np.ndarray) -> list[np.ndarray]:
-    """Compact connected components of a distinct-hue mask that do not touch the pad rim."""
+def distinct_components(mask: np.ndarray, min_area: int, rim: np.ndarray,
+                        solid: np.ndarray | None = None) -> list[np.ndarray]:
+    """Compact connected components of a distinct-hue mask that do not touch the pad rim
+    (opened with `solid`, when given, so that only parts thicker than it remain)."""
     m = cv2.morphologyEx(mask.astype(np.uint8) * 255, cv2.MORPH_OPEN,
                          cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+    if solid is not None:
+        m = cv2.morphologyEx(m, cv2.MORPH_OPEN, solid)
     contours, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     parts = []
     for c in contours:
@@ -441,8 +528,10 @@ def distinct_components(mask: np.ndarray, min_area: int, rim: np.ndarray) -> lis
     return parts
 
 
-def fit_circle(hull: np.ndarray, w: int, h: int) -> tuple[float, float, float, float] | None:
-    """Least-squares circle through the hull outline, ignoring points on the frame edge.
+def fit_circle(hull: np.ndarray, w: int, h: int,
+               exclude: np.ndarray | None = None) -> tuple[float, float, float, float] | None:
+    """Least-squares circle through the hull outline, ignoring points on the frame edge
+    (and in `exclude`, e.g. next to a landing leg: both cut a pad with a straight line).
     Returns (cx, cy, r, rms residual / r), or None when there is too little outline."""
     outline = np.zeros((h, w), np.uint8)
     cv2.drawContours(outline, [hull], -1, 255, 1)
@@ -450,6 +539,8 @@ def fit_circle(hull: np.ndarray, w: int, h: int) -> tuple[float, float, float, f
     outline[-3:, :] = 0
     outline[:, :3] = 0
     outline[:, -3:] = 0
+    if exclude is not None:
+        outline[exclude] = 0
     pts = np.argwhere(outline > 0)[:, ::-1].astype(np.float64)   # (x, y)
     if len(pts) < 30:
         return None
@@ -465,16 +556,19 @@ def fit_circle(hull: np.ndarray, w: int, h: int) -> tuple[float, float, float, f
     return float(cx), float(cy), r, residual
 
 
-def circular_segment(hull: np.ndarray, bw: int, bh: int, w: int, h: int) -> bool:
-    """Is this hull (cut by the frame edge) a segment of a circle? Fit a circle to the
-    hull outline away from the frame edge and check the fit and the segment's thickness."""
-    fit = fit_circle(hull, w, h)
+def circular_segment(hull: np.ndarray, bw: int, bh: int, w: int, h: int,
+                     exclude: np.ndarray | None = None) -> bool:
+    """Is this hull (cut by the frame edge or a leg) a segment of a circle? Fit a circle
+    to the rest of the hull outline and check the fit and the segment's thickness."""
+    fit = fit_circle(hull, w, h, exclude)
     if fit is None:
         return False
     r, residual = fit[2], fit[3]
-    # A plausible pad: radius no larger than the frame, and the visible segment at least
-    # 12 % of the radius thick (a hairline sliver at the edge is not worth a label).
-    return residual <= 0.04 and r <= max(w, h) and min(bw, bh) >= 0.12 * r
+    # A plausible pad: radius no larger than the frame and in proportion to the visible
+    # part, and the visible segment at least 12 % of the radius thick (a hairline sliver
+    # at the edge is not worth a label).
+    return (residual <= 0.04 and r <= min(max(w, h), 2.5 * cv2.minEnclosingCircle(hull)[1])
+            and min(bw, bh) >= 0.12 * r)
 
 
 def circle_area_px(mask: np.ndarray) -> int:
@@ -615,9 +709,9 @@ def label_frame(frame: np.ndarray, args: argparse.Namespace, shadow: ShadowEstim
     # detection in the corner is a pad the camera tilted into it, foot or no foot; and
     # a detection of a color the airframe does not have (a green pad under the red foot)
     # is a pad as well.
+    leg = leg_mask(hsv) if pads else None
     if ignore is not None:
         gear_max = GEAR_MAX_FRAC * w * h
-        leg = leg_mask(hsv) if pads else None
 
         def is_gear(box: Box, px: int, filled: np.ndarray | None = None) -> bool:
             color = CLASSES[box.cls].split("_")[0]
@@ -643,7 +737,7 @@ def label_frame(frame: np.ndarray, args: argparse.Namespace, shadow: ShadowEstim
             pad_color = CLASSES[box.cls].split("_")[0]
             cmask = color_mask(hsv, pad_color, fill_holes=False)
             boxes.extend(detect_tins_on_pad(hsv, filled, cmask, pad_color, args.min_tin_area,
-                                            args.max_tin_frac_pad, shadow, ignore))
+                                            args.max_tin_frac_pad, shadow, ignore, leg))
     if args.free_tins:
         pad_union = np.zeros(frame.shape[:2], np.uint8)
         for _, filled in pads:
