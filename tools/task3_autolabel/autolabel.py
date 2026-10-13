@@ -221,9 +221,14 @@ def detect_pads(frame: np.ndarray, args: argparse.Namespace,
             solidity = area / hull_area
             x, y, bw, bh = cv2.boundingRect(hull)
             touches_border = x <= 1 or y <= 1 or x + bw >= w - 1 or y + bh >= h - 1
-            # A circle cut by the frame edge is less round; relax (not drop) the test.
+            if solidity < 0.80:
+                continue
+            # A circle cut by the frame edge is less round; relax the test, and a thin
+            # arc at the edge (circularity far lower) passes if its outline really is
+            # a circle of a plausible radius: a paving block or a stain cut by the edge
+            # is not.
             need = args.min_circularity * (0.75 if touches_border else 1.0)
-            if circularity < need or solidity < 0.80:
+            if circularity < need and not (touches_border and circular_segment(hull, bw, bh, w, h)):
                 continue
             # A disc fills ~78 % of its box; a blotch that passed the hull tests fills far less.
             if area / float(bw * bh) < 0.55:
@@ -244,7 +249,7 @@ def hue_in_band(hsv: np.ndarray, color: str) -> np.ndarray:
 
 def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_mask: np.ndarray,
                        pad_color: str, min_area: int, max_area_frac: float,
-                       shadow: "ShadowEstimate") -> list[Box]:
+                       shadow: "ShadowEstimate", ignore: np.ndarray | None = None) -> list[Box]:
     """Tins on a pad = small blobs inside the pad hull that are either of another
     hue than the pad or much darker than the pad's paint.
 
@@ -264,10 +269,13 @@ def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_ma
     """
     s_ch, v_ch = hsv[:, :, 1], hsv[:, :, 2]
     # Erode by ~6 % of the circle radius so the rim and anti-aliased edge are ignored.
+    # The frame edge is not a rim: a pad cut by the frame keeps its pixels up to the edge,
+    # so a can cut by the frame can still be found.
     circle_area = circle_area_px(circle_mask)
     radius = int(np.sqrt(circle_area / np.pi))
     k = max(5, 2 * int(0.06 * radius) + 1)
-    inner = cv2.erode(circle_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))) > 0
+    padded = cv2.copyMakeBorder(circle_mask, k, k, k, k, cv2.BORDER_CONSTANT, value=255)
+    inner = cv2.erode(padded, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))[k:-k, k:-k] > 0
     grey = s_ch < 80
     # The leg = a large grey region inside the circle; a can's grey lid is a small one.
     n_grey, grey_labels, grey_stats, _ = cv2.connectedComponentsWithStats(
@@ -279,6 +287,8 @@ def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_ma
     pad_hue = hue_in_band(hsv, pad_color)
     strict = inner & (circle_color_mask > 0)
     pad_v = float(np.median(v_ch[strict])) if np.count_nonzero(strict) >= 50 else 200.0
+    if ignore is not None:
+        inner &= ignore == 0   # the gear foot over a pad is neither a can nor a shadow
     distinct_px = inner & ~grey & ~pad_hue & (s_ch >= 100)
     dark_same = inner & ~grey & pad_hue & (v_ch < 0.55 * pad_v)
     holes = ((distinct_px | dark_same).astype(np.uint8)) * 255
@@ -299,7 +309,9 @@ def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_ma
     holes = cv2.morphologyEx(holes, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
     contours, _ = cv2.findContours(holes, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     ring_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    inner_u8 = inner.astype(np.uint8) * 255
+    rim = (~inner).astype(np.uint8) * 255
+    if ignore is not None:
+        rim[ignore > 0] = 0
     # A can is a fixed fraction of a pad (both are real objects): a blob far smaller
     # than that is a speck of dirt, however round.
     min_area = max(min_area, int(0.003 * circle_area))
@@ -311,7 +323,6 @@ def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_ma
         if area < min_area or area > max_area_frac * circle_area:
             continue
         x, y, bw, bh = cv2.boundingRect(c)
-        at_frame_edge = x <= 1 or y <= 1 or x + bw >= w - 1 or y + bh >= h - 1
         perim = cv2.arcLength(c, True)
         # Shape on the convex hull: a dark can's outline is ragged (JPEG noise at V ~ 20),
         # which drags the raw circularity below the threshold, while the hull of a can,
@@ -321,13 +332,24 @@ def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_ma
         hull_area, hull_perim = cv2.contourArea(hull), cv2.arcLength(hull, True)
         circ = 4 * np.pi * hull_area / (hull_perim * hull_perim) if hull_perim > 0 else 0
         solidity = area / hull_area if hull_area > 0 else 0
-        if not 0.3 <= bw / max(bh, 1) <= 3.0 or circ < 0.4 or solidity < 0.5:
-            continue  # elongated or ragged = leg shadow / board seam crossing the pad, not a can
         blob = np.zeros(hsv.shape[:2], np.uint8)
         cv2.drawContours(blob, [c], -1, 255, thickness=-1)
+        if not 0.3 <= bw / max(bh, 1) <= 3.0 or circ < 0.4 or solidity < 0.5:
+            # Elongated or ragged = leg shadow / board seam crossing the pad, not a can.
+            # But a can of another hue glued to such a region is still a can: take the
+            # compact distinct-hue components inside it on their own.
+            for part in distinct_components(((blob > 0) & distinct_px), min_area, rim):
+                color = tin_color(hsv, part)
+                if color is not None and color != pad_color:
+                    x, y, bw, bh = cv2.boundingRect(part)
+                    boxes.append(Box(cls_id(color, "Tin"), x, y, x + bw, y + bh))
+            continue
         dilated = cv2.dilate(blob, ring_kernel)
-        if np.count_nonzero(dilated & ~inner_u8) > 0.15 * perim:
-            continue  # hole touches the pad rim = cut-off edge, not a can
+        # A hole touching the pad's rim is the pad's own cut-off edge, not a can. The
+        # frame edge is not a rim (inner reaches it), and neither is the gear foot's
+        # outline (a can half hidden under the foot is still a can).
+        if np.count_nonzero(dilated & rim) > 0.15 * perim:
+            continue
         # Pixels that are not pad-colored are the can for sure; they also name its color
         # (a blue can half hidden by the leg is blue, however much shadow is in the blob).
         distinct_u8 = cv2.morphologyEx(((blob > 0) & distinct_px).astype(np.uint8) * 255, cv2.MORPH_OPEN,
@@ -354,8 +376,8 @@ def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_ma
         # can. Inside a shadow region the blob must also be solid, since shadow gradients
         # make ragged blobs.
         touches_leg = np.count_nonzero((dilated > 0) & leg)
-        if circ < 0.6 or touches_leg > 0.1 * perim or (in_shadow and solidity < 0.8) or at_frame_edge:
-            continue  # at the frame edge a dark same-hue blob is the rim of a cut pad, not a can
+        if circ < 0.6 or touches_leg > 0.1 * perim or (in_shadow and solidity < 0.8):
+            continue
         deferred.append((color, blob))
     for color, blob in deferred:
         x, y, bw, bh = cv2.boundingRect(blob)
@@ -370,6 +392,56 @@ def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_ma
             bw, bh = int(keep[:, 0].max()) - x + 1, int(keep[:, 1].max()) - y + 1
         boxes.append(Box(cls_id(color, "Tin"), x, y, x + bw, y + bh))
     return boxes
+
+
+def distinct_components(mask: np.ndarray, min_area: int, rim: np.ndarray) -> list[np.ndarray]:
+    """Compact connected components of a distinct-hue mask that do not touch the pad rim."""
+    m = cv2.morphologyEx(mask.astype(np.uint8) * 255, cv2.MORPH_OPEN,
+                         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+    contours, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    parts = []
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < min_area:
+            continue
+        hull = cv2.convexHull(c)
+        hull_area, hull_perim = cv2.contourArea(hull), cv2.arcLength(hull, True)
+        circ = 4 * np.pi * hull_area / (hull_perim * hull_perim) if hull_perim > 0 else 0
+        if circ < 0.5 or area < 0.6 * hull_area:
+            continue
+        part = np.zeros(mask.shape, np.uint8)
+        cv2.drawContours(part, [c], -1, 255, thickness=-1)
+        ring = cv2.dilate(part, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))) & rim
+        if np.count_nonzero(ring) > 0.15 * cv2.arcLength(c, True):
+            continue
+        parts.append(part)
+    return parts
+
+
+def circular_segment(hull: np.ndarray, bw: int, bh: int, w: int, h: int) -> bool:
+    """Is this hull (cut by the frame edge) a segment of a circle? Fit a circle to the
+    hull outline away from the frame edge and check the fit and the segment's thickness."""
+    outline = np.zeros((h, w), np.uint8)
+    cv2.drawContours(outline, [hull], -1, 255, 1)
+    outline[:3, :] = 0
+    outline[-3:, :] = 0
+    outline[:, :3] = 0
+    outline[:, -3:] = 0
+    pts = np.argwhere(outline > 0)[:, ::-1].astype(np.float64)   # (x, y)
+    if len(pts) < 30:
+        return False
+    x, y = pts[:, 0], pts[:, 1]
+    a = np.column_stack([x, y, np.ones_like(x)])
+    sol, *_ = np.linalg.lstsq(a, -(x * x + y * y), rcond=None)
+    cx, cy = -sol[0] / 2, -sol[1] / 2
+    r2 = cx * cx + cy * cy - sol[2]
+    if r2 <= 0:
+        return False
+    r = float(np.sqrt(r2))
+    residual = float(np.sqrt(np.mean((np.hypot(x - cx, y - cy) - r) ** 2))) / r
+    # A plausible pad: radius no larger than the frame, and the visible segment at least
+    # 12 % of the radius thick (a hairline sliver at the edge is not worth a label).
+    return residual <= 0.04 and r <= max(w, h) and min(bw, bh) >= 0.12 * r
 
 
 def circle_area_px(mask: np.ndarray) -> int:
@@ -457,7 +529,7 @@ def mask_coverage(box: Box, region: np.ndarray) -> float:
 
 
 def label_frame(frame: np.ndarray, args: argparse.Namespace, shadow: ShadowEstimate,
-                auto_mask: np.ndarray | None = None) -> list[Box]:
+                auto_mask: np.ndarray | None = None, gear_colors: set[str] | None = None) -> list[Box]:
     h, w = frame.shape[:2]
     hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5, 5), 0), cv2.COLOR_BGR2HSV)
     ignore = ignore_region(args.mask, auto_mask, w, h) if (args.mask or auto_mask is not None) else None
@@ -466,12 +538,19 @@ def label_frame(frame: np.ndarray, args: argparse.Namespace, shadow: ShadowEstim
     # is dropped; a pad that merely reaches into the corner keeps its whole box. This
     # comes before merging, or the gear foot next to a red pad would be merged into it.
     # The gear foot is a small blob (it is a fixed part of the airframe), so a large
-    # detection in the corner is a pad the camera tilted into it, foot or no foot.
+    # detection in the corner is a pad the camera tilted into it, foot or no foot; and
+    # a detection of a color the airframe does not have (a green pad under the red foot)
+    # is a pad as well.
     if ignore is not None:
         gear_max = GEAR_MAX_FRAC * w * h
-        pads = [(b, f) for b, f in pads
-                if mask_coverage(b, ignore) < 0.7 or np.count_nonzero(f) >= gear_max]
-        free_tins = [t for t in free_tins if mask_coverage(t, ignore) < 0.7]
+
+        def is_gear(box: Box, px: int) -> bool:
+            color = CLASSES[box.cls].split("_")[0]
+            return (mask_coverage(box, ignore) >= 0.7 and px < gear_max
+                    and (not gear_colors or color in gear_colors))
+
+        pads = [(b, f) for b, f in pads if not is_gear(b, int(np.count_nonzero(f)))]
+        free_tins = [t for t in free_tins if not is_gear(t, (t.x2 - t.x1) * (t.y2 - t.y1))]
     pads = merge_pads(pads)
     pads = drop_nested_pads(pads)
     boxes: list[Box] = []
@@ -481,7 +560,7 @@ def label_frame(frame: np.ndarray, args: argparse.Namespace, shadow: ShadowEstim
             pad_color = CLASSES[box.cls].split("_")[0]
             cmask = color_mask(hsv, pad_color, fill_holes=False)
             boxes.extend(detect_tins_on_pad(hsv, filled, cmask, pad_color, args.min_tin_area,
-                                            args.max_tin_frac_pad, shadow))
+                                            args.max_tin_frac_pad, shadow, ignore))
     if args.free_tins:
         pad_union = np.zeros(frame.shape[:2], np.uint8)
         for _, filled in pads:
@@ -515,12 +594,13 @@ def iter_videos(inputs: list[str]):
             print(f"skip (not a video): {p}", file=sys.stderr)
 
 
-def static_color_mask(video: Path, step: int, max_frames: int = 60) -> np.ndarray | None:
+def static_color_mask(video: Path, step: int, max_frames: int = 60) -> tuple[np.ndarray | None, set[str]]:
     """Pixels that are pad-colored in most sampled frames belong to the airframe
-    (red landing gear in the corners), not to the ground: the ground moves."""
+    (red landing gear in the corners), not to the ground: the ground moves.
+    Returns (mask, colors of the airframe parts found)."""
     cap = cv2.VideoCapture(str(video))
     if not cap.isOpened():
-        return None
+        return None, set()
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     stride = max(step, total // max_frames if total else step)
     acc = None
@@ -532,19 +612,23 @@ def static_color_mask(video: Path, step: int, max_frames: int = 60) -> np.ndarra
             break
         if idx % stride == 0:
             hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5, 5), 0), cv2.COLOR_BGR2HSV)
-            any_color = np.zeros(hsv.shape[:2], np.uint8)
-            for color in COLORS:
-                any_color |= color_mask(hsv, color)
-            acc = (any_color > 0).astype(np.float32) if acc is None else acc + (any_color > 0)
+            masks = {color: (color_mask(hsv, color) > 0).astype(np.float32) for color in COLORS}
+            acc = masks if acc is None else {color: acc[color] + masks[color] for color in COLORS}
             n += 1
         idx += 1
     cap.release()
     if acc is None or n < 5:
-        return None
-    static = ((acc / n) >= 0.5).astype(np.uint8) * 255
-    if not np.count_nonzero(static):
-        return None
-    return cv2.dilate(static, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31)))
+        return None, set()
+    static = np.zeros(next(iter(acc.values())).shape, np.uint8)
+    colors = set()
+    for color in COLORS:
+        part = ((acc[color] / n) >= 0.5).astype(np.uint8) * 255
+        if np.count_nonzero(part):
+            colors.add(color)
+            static |= part
+    if not colors:
+        return None, set()
+    return cv2.dilate(static, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))), colors
 
 
 def process_video(video: Path, args: argparse.Namespace) -> dict:
@@ -554,7 +638,7 @@ def process_video(video: Path, args: argparse.Namespace) -> dict:
         return {"video": str(video), "error": "cannot open"}
     src_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     step = max(1, int(round(src_fps / args.fps))) if args.fps > 0 else 1
-    auto_mask = None if args.no_auto_mask else static_color_mask(video, step)
+    auto_mask, gear_colors = (None, set()) if args.no_auto_mask else static_color_mask(video, step)
     out = Path(args.out)
     (out / "images").mkdir(parents=True, exist_ok=True)
     (out / "labels").mkdir(parents=True, exist_ok=True)
@@ -565,6 +649,16 @@ def process_video(video: Path, args: argparse.Namespace) -> dict:
              "per_class": {c: 0 for c in CLASSES},
              "auto_mask_frac": 0.0 if auto_mask is None else round(float(np.count_nonzero(auto_mask)) / auto_mask.size, 4)}
     shadow = ShadowEstimate()
+    if args.tins:
+        # Learn the shadow direction from a few frames spread over the video before
+        # labeling, so the first frames can split a same-color can from its shadow too.
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        for pos in np.linspace(0, max(total - 1, 0), 8)[1:-1]:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(pos))
+            ok, frame = cap.read()
+            if ok:
+                label_frame(frame, args, shadow, auto_mask, gear_colors)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     idx = 0
     while True:
         ok, frame = cap.read()
@@ -572,7 +666,7 @@ def process_video(video: Path, args: argparse.Namespace) -> dict:
             break
         if idx % step == 0:
             stats["frames_seen"] += 1
-            boxes = label_frame(frame, args, shadow, auto_mask)
+            boxes = label_frame(frame, args, shadow, auto_mask, gear_colors)
             if boxes or args.keep_empty:
                 stem = f"{video.stem}_{idx:06d}"
                 h, w = frame.shape[:2]
