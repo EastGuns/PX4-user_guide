@@ -72,6 +72,9 @@ RELAXED_S_FLOOR = 200
 # The landing gear is red and pokes into the top corners when the camera tilts.
 # The persistent part is also auto-masked (static_color_mask); this covers the rest.
 DEFAULT_MASK = ("0,0,0.15,0.2", "0.85,0,1,0.2")
+# The gear foot covers at most ~1 % of the frame (it is a fixed part of the airframe);
+# a pad-colored blob in a masked corner that is larger than this is a pad.
+GEAR_MAX_FRAC = 0.02
 
 # Hue bands used to name a tin from its pixels (no V floor: dark/shaded cans).
 TIN_HUE = {"Red": [(0, 12), (165, 179)], "Green": [(40, 90), ], "Blue": [(95, 135)]}
@@ -462,8 +465,12 @@ def label_frame(frame: np.ndarray, args: argparse.Namespace, shadow: ShadowEstim
     # A detection that sits mostly inside an ignored region (landing gear in a top corner)
     # is dropped; a pad that merely reaches into the corner keeps its whole box. This
     # comes before merging, or the gear foot next to a red pad would be merged into it.
+    # The gear foot is a small blob (it is a fixed part of the airframe), so a large
+    # detection in the corner is a pad the camera tilted into it, foot or no foot.
     if ignore is not None:
-        pads = [(b, f) for b, f in pads if mask_coverage(b, ignore) < 0.7]
+        gear_max = GEAR_MAX_FRAC * w * h
+        pads = [(b, f) for b, f in pads
+                if mask_coverage(b, ignore) < 0.7 or np.count_nonzero(f) >= gear_max]
         free_tins = [t for t in free_tins if mask_coverage(t, ignore) < 0.7]
     pads = merge_pads(pads)
     pads = drop_nested_pads(pads)
