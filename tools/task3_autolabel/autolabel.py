@@ -54,11 +54,16 @@ COLORS = ("Red", "Green", "Blue")
 # HSV ranges (OpenCV scale: H 0-179, S 0-255, V 0-255). Red wraps around 0.
 # The pads are fully saturated paint (S ~ 255), while pavers, shadows and the
 # grey board stay below S ~ 225 and V ~ 120, so high S/V floors reject them.
+# A pad in the drone's shadow drops to V ~ 80, so once a pad is found with the
+# strict floor its shadowed part is recovered with SHADOW_V_FLOOR, but only
+# inside the pad's own enclosing circle (the shadowed board is blue-ish too).
 HSV_RANGES = {
     "Red": [((0, 200, 110), (8, 255, 255)), ((170, 200, 110), (179, 255, 255))],
     "Green": [((45, 200, 110), (80, 255, 255))],
-    "Blue": [((100, 200, 100), (130, 255, 255))],
+    "Blue": [((100, 200, 110), (130, 255, 255))],
 }
+SHADOW_V_FLOOR = 60
+
 # Hue bands used to name a tin from its pixels (no V floor: dark/shaded cans).
 TIN_HUE = {"Red": [(0, 12), (165, 179)], "Green": [(40, 90), ], "Blue": [(95, 135)]}
 
@@ -103,9 +108,11 @@ class Box:
         return f"{self.cls} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}"
 
 
-def color_mask(hsv: np.ndarray, name: str) -> np.ndarray:
+def color_mask(hsv: np.ndarray, name: str, v_floor: int | None = None) -> np.ndarray:
     mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
     for lo, hi in HSV_RANGES[name]:
+        if v_floor is not None:
+            lo = (lo[0], lo[1], v_floor)
         mask |= cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8))
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
@@ -123,9 +130,28 @@ def detect_pads(frame: np.ndarray, args: argparse.Namespace) -> tuple[list[tuple
     max_tin = args.max_tin_frac * w * h
     for color in COLORS:
         mask = color_mask(hsv, color)
+        relaxed = color_mask(hsv, color, SHADOW_V_FLOOR)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for c in contours:
             area = cv2.contourArea(c)
+            if area >= min_pad:
+                # Cut thin bridges to blue-ish shadowed board before sizing the pad,
+                # then recover the shadowed part of the pad: darker same-hue pixels,
+                # but only inside the enclosing circle of what the strict mask found.
+                blob = np.zeros_like(mask)
+                cv2.drawContours(blob, [c], -1, 255, thickness=-1)
+                k = max(7, int(0.08 * np.sqrt(area))) | 1
+                core = cv2.morphologyEx(blob, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+                core = largest_component(core) if np.count_nonzero(core) else blob
+                cc, _ = cv2.findContours(core, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                (ex, ey), er = cv2.minEnclosingCircle(max(cc, key=cv2.contourArea) if cc else c)
+                region = np.zeros_like(mask)
+                cv2.circle(region, (int(ex), int(ey)), int(er * 1.05), 255, thickness=-1)
+                grown = largest_component((relaxed & region) | core)
+                gc, _ = cv2.findContours(grown, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if gc:
+                    c = max(gc, key=cv2.contourArea)
+                    area = cv2.contourArea(c)
             if area < min_pad:
                 # Small saturated blob of a target color lying on the board or
                 # ground = a can that is not on a pad (visible if it is bright).
@@ -148,7 +174,8 @@ def detect_pads(frame: np.ndarray, args: argparse.Namespace) -> tuple[list[tuple
             touches_border = x <= 1 or y <= 1 or x + bw >= w - 1 or y + bh >= h - 1
             # A circle cut by the frame edge is less round; relax (not drop) the test.
             need = args.min_circularity * (0.75 if touches_border else 1.0)
-            if circularity < need or solidity < 0.80:
+            # Solidity a little lenient: the drone's leg can carve a bite out of the pad.
+            if circularity < need or solidity < 0.75:
                 continue
             filled = np.zeros_like(mask)
             cv2.drawContours(filled, [hull], -1, 255, thickness=-1)
