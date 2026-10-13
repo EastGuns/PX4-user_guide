@@ -137,8 +137,15 @@ def color_mask(hsv: np.ndarray, name: str, v_floor: int | None = None, fill_hole
     return mask
 
 
-def detect_pads(frame: np.ndarray, args: argparse.Namespace) -> tuple[list[tuple[Box, np.ndarray]], list[Box]]:
-    """Return ([(pad_box, filled_mask)], [free-standing tin boxes])."""
+def detect_pads(frame: np.ndarray, args: argparse.Namespace,
+                ignore: np.ndarray | None = None) -> tuple[list[tuple[Box, np.ndarray]], list[Box]]:
+    """Return ([(pad_box, filled_mask)], [free-standing tin boxes]).
+
+    `ignore` marks regions holding the airframe (corner masks + auto mask): pixels
+    there are never pulled into a pad as its shadowed part or as a split-off fragment,
+    so the red landing-gear foot next to a red pad does not stretch the pad's box.
+    The strict seed is left alone, so a pad that merely reaches into a corner stays whole.
+    """
     h, w = frame.shape[:2]
     hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5, 5), 0), cv2.COLOR_BGR2HSV)
     pads: list[tuple[Box, np.ndarray]] = []
@@ -149,6 +156,8 @@ def detect_pads(frame: np.ndarray, args: argparse.Namespace) -> tuple[list[tuple
     for color in COLORS:
         mask = color_mask(hsv, color)
         relaxed = color_mask(hsv, color, SHADOW_V_FLOOR, s_floor=RELAXED_S_FLOOR)
+        if ignore is not None:
+            relaxed[ignore > 0] = 0
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for c in contours:
             area = cv2.contourArea(c)
@@ -233,66 +242,97 @@ def hue_in_band(hsv: np.ndarray, color: str) -> np.ndarray:
 def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_mask: np.ndarray,
                        pad_color: str, min_area: int, max_area_frac: float,
                        shadow: "ShadowEstimate") -> list[Box]:
-    """Tins on a pad = regions inside the pad hull that are NOT the pad color.
+    """Tins on a pad = small blobs inside the pad hull that are either of another
+    hue than the pad or much darker than the pad's paint.
 
     A can casts a shadow on the pad, and the shadow is as dark as a dark can,
-    so the hole is can + shadow. Pixels whose hue differs from the pad's are
+    so a blob is can + shadow. Pixels whose hue differs from the pad's are
     certainly the can; the rest (pad hue, dark) is shadow unless the can has
     the pad's color. For a same-color can the shadow direction learned from
-    the other cans in this video says which end of the hole is the can.
+    the other cans in this video says which end of the blob is the can.
+
+    Brightness is judged relative to the pad's own sunlit paint, not with a
+    fixed threshold: the defocused halo of a landing leg and washed-out paint
+    near the frame edge are a bit darker and less saturated than the paint but
+    far brighter than any can, so they are neither pad nor hole and never glue
+    a can to a large region. The pad under the drone's or the leg's shadow is
+    a large dark same-hue region; it is removed, but a compact blob inside it
+    that is darker still is a can standing in that shadow.
     """
+    s_ch, v_ch = hsv[:, :, 1], hsv[:, :, 2]
     # Erode by ~6 % of the circle radius so the rim and anti-aliased edge are ignored.
-    radius = int(np.sqrt(np.count_nonzero(circle_mask) / np.pi))
+    circle_area = circle_area_px(circle_mask)
+    radius = int(np.sqrt(circle_area / np.pi))
     k = max(5, 2 * int(0.06 * radius) + 1)
-    inner = cv2.erode(circle_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
-    # Not pad color and not the grey leg (S < 80). The pad under the drone's shadow is
-    # also "not pad color" (too dark), but it is one large same-hue region, while a can
-    # of the pad's color is a small one: only large dark same-hue regions are removed.
-    grey = hsv[:, :, 1] < 80
-    holes = inner & cv2.bitwise_not(circle_color_mask)
-    holes[grey] = 0
-    dark_same_hue = inner & color_mask(hsv, pad_color, SHADOW_V_FLOOR, fill_holes=False, s_floor=RELAXED_S_FLOOR) & holes
-    n_lab, labels, st, _ = cv2.connectedComponentsWithStats(dark_same_hue, connectivity=8)
-    for i in range(1, n_lab):
-        if st[i, cv2.CC_STAT_AREA] >= 0.05 * circle_area_px(circle_mask):
-            holes[labels == i] = 0
-    holes = cv2.morphologyEx(holes, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
-    circle_area = int(np.count_nonzero(circle_mask))
+    inner = cv2.erode(circle_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))) > 0
+    grey = s_ch < 80
+    # The leg = a large grey region inside the circle; a can's grey lid is a small one.
+    n_grey, grey_labels, grey_stats, _ = cv2.connectedComponentsWithStats(
+        (grey & (circle_mask > 0)).astype(np.uint8), connectivity=8)
+    leg = np.zeros(grey.shape, bool)
+    for i in range(1, n_grey):
+        if grey_stats[i, cv2.CC_STAT_AREA] >= 0.02 * circle_area:
+            leg |= grey_labels == i
     pad_hue = hue_in_band(hsv, pad_color)
+    strict = inner & (circle_color_mask > 0)
+    pad_v = float(np.median(v_ch[strict])) if np.count_nonzero(strict) >= 50 else 200.0
+    distinct_px = inner & ~grey & ~pad_hue & (s_ch >= 100)
+    dark_same = inner & ~grey & pad_hue & (v_ch < 0.55 * pad_v)
+    holes = ((distinct_px | dark_same).astype(np.uint8)) * 255
+    # Large dark same-hue regions are the pad in shadow (drone, leg): removed, but a
+    # compact blob inside that is darker than the shadow is a can standing in it.
+    in_shadow_blobs: list[np.ndarray] = []
+    n_lab, labels, st, _ = cv2.connectedComponentsWithStats(dark_same.astype(np.uint8), connectivity=8)
+    for i in range(1, n_lab):
+        if st[i, cv2.CC_STAT_AREA] < 0.05 * circle_area:
+            continue
+        comp = labels == i
+        holes[comp] = 0
+        v_b = float(np.median(v_ch[comp]))
+        sub = cv2.morphologyEx((comp & (v_ch < 0.6 * v_b)).astype(np.uint8) * 255, cv2.MORPH_OPEN,
+                               cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+        sub_contours, _ = cv2.findContours(sub, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        in_shadow_blobs.extend(sub_contours)
+    holes = cv2.morphologyEx(holes, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
     contours, _ = cv2.findContours(holes, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    ring_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    inner_u8 = inner.astype(np.uint8) * 255
+    # A can is a fixed fraction of a pad (both are real objects): a blob far smaller
+    # than that is a speck of dirt, however round.
+    min_area = max(min_area, int(0.003 * circle_area))
+    h, w = hsv.shape[:2]
     boxes = []
     deferred = []   # same-color cans, resolved once the shadow direction is known
-    for c in contours:
+    for c, in_shadow in [(c, False) for c in contours] + [(c, True) for c in in_shadow_blobs]:
         area = cv2.contourArea(c)
         if area < min_area or area > max_area_frac * circle_area:
             continue
         x, y, bw, bh = cv2.boundingRect(c)
-        if x <= 1 or y <= 1 or x + bw >= hsv.shape[1] - 1 or y + bh >= hsv.shape[0] - 1:
-            continue  # touches the frame edge: the desaturated rim of a pad cut by the frame, not a can
+        at_frame_edge = x <= 1 or y <= 1 or x + bw >= w - 1 or y + bh >= h - 1
         perim = cv2.arcLength(c, True)
-        if not 0.3 <= bw / max(bh, 1) <= 3.0 or (perim > 0 and 4 * np.pi * area / (perim * perim) < 0.4):
+        # Shape on the convex hull: a dark can's outline is ragged (JPEG noise at V ~ 20),
+        # which drags the raw circularity below the threshold, while the hull of a can,
+        # or of a can plus its shadow, is still a compact blob. A leg shadow or board
+        # seam crossing the pad stays elongated on its hull as well.
+        hull = cv2.convexHull(c)
+        hull_area, hull_perim = cv2.contourArea(hull), cv2.arcLength(hull, True)
+        circ = 4 * np.pi * hull_area / (hull_perim * hull_perim) if hull_perim > 0 else 0
+        solidity = area / hull_area if hull_area > 0 else 0
+        if not 0.3 <= bw / max(bh, 1) <= 3.0 or circ < 0.4 or solidity < 0.5:
             continue  # elongated or ragged = leg shadow / board seam crossing the pad, not a can
-        blob = np.zeros_like(holes)
+        blob = np.zeros(hsv.shape[:2], np.uint8)
         cv2.drawContours(blob, [c], -1, 255, thickness=-1)
-        ring = cv2.dilate(blob, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))) & ~inner
-        if np.count_nonzero(ring) > 0.15 * perim:
+        dilated = cv2.dilate(blob, ring_kernel)
+        if np.count_nonzero(dilated & ~inner_u8) > 0.15 * perim:
             continue  # hole touches the pad rim = cut-off edge, not a can
-        color = tin_color(hsv, blob)
-        if color is None:
-            continue
-        if color == pad_color:
-            # Same hue as the pad: a dark can, or the pad's own desaturated rim near the
-            # frame edge / a sliver of shadow. Only a clearly round blob away from the edge counts.
-            circ = 4 * np.pi * area / (perim * perim) if perim > 0 else 0
-            margin = 0.02 * hsv.shape[1]
-            if circ < 0.6 or x < margin or y < margin or x + bw > hsv.shape[1] - margin or y + bh > hsv.shape[0] - margin:
-                continue
-        # Pixels that are not pad-colored are the can for sure.
-        distinct = (blob > 0) & ~pad_hue & (hsv[:, :, 1] >= 100)
-        distinct_u8 = cv2.morphologyEx(distinct.astype(np.uint8) * 255, cv2.MORPH_OPEN,
+        # Pixels that are not pad-colored are the can for sure; they also name its color
+        # (a blue can half hidden by the leg is blue, however much shadow is in the blob).
+        distinct_u8 = cv2.morphologyEx(((blob > 0) & distinct_px).astype(np.uint8) * 255, cv2.MORPH_OPEN,
                                        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
         n_distinct = int(np.count_nonzero(distinct_u8))
-        if color != pad_color and n_distinct >= max(min_area // 2, 10):
+        color = tin_color(hsv, distinct_u8) if n_distinct >= max(min_area // 2, 10) else None
+        if color is not None and color != pad_color:
+            # Its visible part is the can, even when the frame edge cuts it.
             can = largest_component(distinct_u8)
             rest = (blob > 0) & (can == 0)
             cy_c, cx_c = np.argwhere(can > 0).mean(axis=0)
@@ -301,8 +341,19 @@ def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_ma
                 shadow.add(rx - cx_c, ry - cy_c)
             x, y, bw, bh = cv2.boundingRect(can)
             boxes.append(Box(cls_id(color, "Tin"), x, y, x + bw, y + bh))
-        else:
-            deferred.append((color, blob))
+            continue
+        color = tin_color(hsv, blob)
+        if color is None:
+            continue
+        # No distinct pixels: a can of the pad's own color (dark against the paint) or a
+        # shadow sliver next to the leg. Only a clearly round blob that does not lean on
+        # the leg counts: next to the leg a dark half-disc may be the shadow of a hidden
+        # can. Inside a shadow region the blob must also be solid, since shadow gradients
+        # make ragged blobs.
+        touches_leg = np.count_nonzero((dilated > 0) & leg)
+        if circ < 0.6 or touches_leg > 0.1 * perim or (in_shadow and solidity < 0.8) or at_frame_edge:
+            continue  # at the frame edge a dark same-hue blob is the rim of a cut pad, not a can
+        deferred.append((color, blob))
     for color, blob in deferred:
         x, y, bw, bh = cv2.boundingRect(blob)
         d = shadow.direction()
@@ -385,14 +436,19 @@ def merge_pads(pads: list[tuple[Box, np.ndarray]]) -> list[tuple[Box, np.ndarray
     return merged
 
 
-def mask_coverage(box: Box, masks: list[tuple[float, float, float, float]],
-                  auto_mask: np.ndarray | None, w: int, h: int) -> float:
-    """Fraction of the box that lies inside ignored regions (manual rectangles + auto mask)."""
+def ignore_region(masks: list[tuple[float, float, float, float]], auto_mask: np.ndarray | None,
+                  w: int, h: int) -> np.ndarray:
+    """Ignored pixels: manual rectangles (normalized) + the auto mask."""
     region = np.zeros((h, w), np.uint8)
     for x1, y1, x2, y2 in masks:
         region[int(y1 * h):int(y2 * h), int(x1 * w):int(x2 * w)] = 255
     if auto_mask is not None:
         region |= auto_mask
+    return region
+
+
+def mask_coverage(box: Box, region: np.ndarray) -> float:
+    """Fraction of the box that lies inside the ignored region."""
     sub = region[box.y1:box.y2, box.x1:box.x2]
     return float(np.count_nonzero(sub)) / max(sub.size, 1)
 
@@ -401,14 +457,16 @@ def label_frame(frame: np.ndarray, args: argparse.Namespace, shadow: ShadowEstim
                 auto_mask: np.ndarray | None = None) -> list[Box]:
     h, w = frame.shape[:2]
     hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5, 5), 0), cv2.COLOR_BGR2HSV)
-    pads, free_tins = detect_pads(frame, args)
+    ignore = ignore_region(args.mask, auto_mask, w, h) if (args.mask or auto_mask is not None) else None
+    pads, free_tins = detect_pads(frame, args, ignore)
+    # A detection that sits mostly inside an ignored region (landing gear in a top corner)
+    # is dropped; a pad that merely reaches into the corner keeps its whole box. This
+    # comes before merging, or the gear foot next to a red pad would be merged into it.
+    if ignore is not None:
+        pads = [(b, f) for b, f in pads if mask_coverage(b, ignore) < 0.7]
+        free_tins = [t for t in free_tins if mask_coverage(t, ignore) < 0.7]
     pads = merge_pads(pads)
     pads = drop_nested_pads(pads)
-    # A detection that sits mostly inside an ignored region (landing gear in a top corner)
-    # is dropped; a pad that merely reaches into the corner keeps its whole box.
-    if args.mask or auto_mask is not None:
-        pads = [(b, f) for b, f in pads if mask_coverage(b, args.mask, auto_mask, w, h) < 0.7]
-        free_tins = [t for t in free_tins if mask_coverage(t, args.mask, auto_mask, w, h) < 0.7]
     boxes: list[Box] = []
     for box, filled in pads:
         boxes.append(box)
@@ -543,7 +601,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--min-pad-area", type=float, default=0.002,
                     help="min pad (Rag) area as fraction of the frame (default 0.002)")
     ap.add_argument("--min-circularity", type=float, default=0.6)
-    ap.add_argument("--min-tin-area", type=int, default=40, help="min tin area in pixels")
+    ap.add_argument("--min-tin-area", type=int, default=40,
+                    help="min tin area in pixels (blobs under 0.3 %% of the pad area are dropped as well)")
     ap.add_argument("--max-tin-frac-pad", type=float, default=0.25,
                     help="max tin area as fraction of the pad it sits on")
     ap.add_argument("--max-tin-frac", type=float, default=0.004,
