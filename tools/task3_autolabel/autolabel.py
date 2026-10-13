@@ -2,8 +2,9 @@
 """Task3 auto-labeling script.
 
 Extracts frames from drone videos (downward-facing camera) and produces
-bounding-box labels for the colored circular ground targets and the small
-objects placed on them. Output follows the YOLO text format (one ``.txt``
+bounding-box labels for the colored circular pads ("Rag") and the colored
+cans ("Tin") placed on them, using the same six classes as the Task3 YOLO
+detector (``tin_detector.hef`` / ``tin_detective.py``). Output follows the YOLO text format (one ``.txt``
 per frame, ``class cx cy w h`` normalized to [0, 1]).
 
 Input files are never modified. Every output goes under ``--out`` (default
@@ -12,10 +13,11 @@ Input files are never modified. Every output goes under ``--out`` (default
     <out>/images/<video_stem>_<frame:06d>.jpg
     <out>/labels/<video_stem>_<frame:06d>.txt
     <out>/classes.txt
+    <out>/data.yaml                               (Ultralytics-style, same class order)
     <out>/preview/<video_stem>_<frame:06d>.jpg   (only with --preview)
 
 Usage:
-    python3 autolabel.py VIDEO_OR_DIR [VIDEO_OR_DIR ...] --out labels_out --fps 2
+    python3 autolabel.py VIDEO_OR_DIR [VIDEO_OR_DIR ...] --out labels_out --fps 2 --tins
 
 Only numpy and opencv-python are required:
     pip install numpy opencv-python-headless
@@ -35,24 +37,49 @@ import numpy as np
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
 
 # --------------------------------------------------------------------------
-# Class definitions. Order = class id in YOLO labels. Adjust to the official
-# Task3 label rules once they are known (see README.md).
+# Class definitions. Order = class id in YOLO labels and MUST match data.yaml
+# of the Task3 detector (NAMES in tin_detective.py). Rag = colored pad on the
+# ground, Tin = colored can that is picked up / delivered.
 # --------------------------------------------------------------------------
 CLASSES = [
-    "red_circle",     # 0
-    "green_circle",   # 1
-    "blue_circle",    # 2
-    "object",         # 3  small block placed on a circle
+    "Blue_Rag",    # 0
+    "Blue_Tin",    # 1
+    "Green_Rag",   # 2
+    "Green_Tin",   # 3
+    "Red_Rag",     # 4
+    "Red_Tin",     # 5
 ]
+COLORS = ("Red", "Green", "Blue")
 
 # HSV ranges (OpenCV scale: H 0-179, S 0-255, V 0-255). Red wraps around 0.
-# The targets are fully saturated paint (S ~ 255), while pavers, shadows and
-# the grey board stay below S ~ 225 and V ~ 120, so high S/V floors reject them.
+# The pads are fully saturated paint (S ~ 255), while pavers, shadows and the
+# grey board stay below S ~ 225 and V ~ 120, so high S/V floors reject them.
 HSV_RANGES = {
-    "red_circle": [((0, 200, 110), (8, 255, 255)), ((170, 200, 110), (179, 255, 255))],
-    "green_circle": [((45, 200, 110), (80, 255, 255))],
-    "blue_circle": [((100, 200, 100), (130, 255, 255))],
+    "Red": [((0, 200, 110), (8, 255, 255)), ((170, 200, 110), (179, 255, 255))],
+    "Green": [((45, 200, 110), (80, 255, 255))],
+    "Blue": [((100, 200, 100), (130, 255, 255))],
 }
+# Hue bands used to name a tin from its pixels (no V floor: dark/shaded cans).
+TIN_HUE = {"Red": [(0, 12), (165, 179)], "Green": [(40, 90), ], "Blue": [(95, 135)]}
+
+
+def cls_id(color: str, kind: str) -> int:
+    return CLASSES.index(f"{color}_{kind}")
+
+
+def tin_color(hsv: np.ndarray, mask: np.ndarray) -> str | None:
+    """Name the can color from the median hue of its saturated pixels."""
+    # Shrink the blob so the anti-aliased rim of the pad does not vote.
+    core = cv2.erode(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+    px = hsv[core > 0] if np.count_nonzero(core) >= 10 else hsv[mask > 0]
+    px = px[px[:, 1] >= 100]
+    if len(px) < 10:
+        return None
+    hue = float(np.median(px[:, 0]))
+    for color, bands in TIN_HUE.items():
+        if any(lo <= hue <= hi for lo, hi in bands):
+            return color
+    return None
 
 
 @dataclass
@@ -82,18 +109,27 @@ def color_mask(hsv: np.ndarray, name: str) -> np.ndarray:
     return mask
 
 
-def detect_circles(frame: np.ndarray, min_area_frac: float, min_circularity: float) -> list[tuple[Box, np.ndarray]]:
-    """Return (box, filled_mask) for every colored circle found."""
+def detect_pads(frame: np.ndarray, args: argparse.Namespace) -> tuple[list[tuple[Box, np.ndarray]], list[Box]]:
+    """Return ([(pad_box, filled_mask)], [free-standing tin boxes])."""
     h, w = frame.shape[:2]
     hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5, 5), 0), cv2.COLOR_BGR2HSV)
-    out: list[tuple[Box, np.ndarray]] = []
-    for name in ("red_circle", "green_circle", "blue_circle"):
-        cls = CLASSES.index(name)
-        mask = color_mask(hsv, name)
+    pads: list[tuple[Box, np.ndarray]] = []
+    tins: list[Box] = []
+    min_pad = args.min_pad_area * w * h
+    max_tin = args.max_tin_frac * w * h
+    for color in COLORS:
+        mask = color_mask(hsv, color)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for c in contours:
             area = cv2.contourArea(c)
-            if area < min_area_frac * w * h:
+            if area < min_pad:
+                # Small saturated blob of a target color lying on the board or
+                # ground = a can that is not on a pad (visible if it is bright).
+                if args.free_tins and args.min_tin_area <= area <= max_tin:
+                    x, y, bw, bh = cv2.boundingRect(c)
+                    ratio = bw / max(bh, 1)
+                    if 0.4 <= ratio <= 2.5:
+                        tins.append(Box(cls_id(color, "Tin"), x, y, x + bw, y + bh))
                 continue
             hull = cv2.convexHull(c)
             hull_area = cv2.contourArea(hull)
@@ -107,18 +143,18 @@ def detect_circles(frame: np.ndarray, min_area_frac: float, min_circularity: flo
             x, y, bw, bh = cv2.boundingRect(hull)
             touches_border = x <= 1 or y <= 1 or x + bw >= w - 1 or y + bh >= h - 1
             # A circle cut by the frame edge is less round; relax (not drop) the test.
-            need = min_circularity * (0.75 if touches_border else 1.0)
+            need = args.min_circularity * (0.75 if touches_border else 1.0)
             if circularity < need or solidity < 0.80:
                 continue
             filled = np.zeros_like(mask)
             cv2.drawContours(filled, [hull], -1, 255, thickness=-1)
-            out.append((Box(cls, x, y, x + bw, y + bh, float(circularity)), filled))
-    return out
+            pads.append((Box(cls_id(color, "Rag"), x, y, x + bw, y + bh, float(circularity)), filled))
+    return pads, tins
 
 
-def detect_objects(frame: np.ndarray, circle_mask: np.ndarray, circle_color_mask: np.ndarray,
-                   min_area: int, max_area_frac: float) -> list[Box]:
-    """Objects = regions inside the circle hull that are NOT the circle color."""
+def detect_tins_on_pad(hsv: np.ndarray, circle_mask: np.ndarray, circle_color_mask: np.ndarray,
+                       min_area: int, max_area_frac: float) -> list[Box]:
+    """Tins on a pad = regions inside the pad hull that are NOT the pad color."""
     # Erode by ~6 % of the circle radius so the rim and anti-aliased edge are ignored.
     radius = int(np.sqrt(np.count_nonzero(circle_mask) / np.pi))
     k = max(5, 2 * int(0.06 * radius) + 1)
@@ -133,8 +169,36 @@ def detect_objects(frame: np.ndarray, circle_mask: np.ndarray, circle_color_mask
         if area < min_area or area > max_area_frac * circle_area:
             continue
         x, y, bw, bh = cv2.boundingRect(c)
-        boxes.append(Box(CLASSES.index("object"), x, y, x + bw, y + bh))
+        perim = cv2.arcLength(c, True)
+        if not 0.4 <= bw / max(bh, 1) <= 2.5 or (perim > 0 and 4 * np.pi * area / (perim * perim) < 0.5):
+            continue  # elongated or ragged = leg shadow / board seam crossing the pad, not a can
+        blob = np.zeros_like(holes)
+        cv2.drawContours(blob, [c], -1, 255, thickness=-1)
+        ring = cv2.dilate(blob, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))) & ~inner
+        if np.count_nonzero(ring) > 0.15 * cv2.arcLength(c, True):
+            continue  # hole touches the pad rim = cut-off edge, not a can
+        color = tin_color(hsv, blob)
+        if color is None:
+            continue
+        boxes.append(Box(cls_id(color, "Tin"), x, y, x + bw, y + bh))
     return boxes
+
+
+def merge_pads(pads: list[tuple[Box, np.ndarray]]) -> list[tuple[Box, np.ndarray]]:
+    """Union same-color pad fragments whose boxes overlap or nearly touch (a pad split by a leg shadow)."""
+    merged: list[tuple[Box, np.ndarray]] = []
+    for box, filled in sorted(pads, key=lambda p: -(p[0].x2 - p[0].x1) * (p[0].y2 - p[0].y1)):
+        for i, (m, mf) in enumerate(merged):
+            pad = 0.2 * max(m.x2 - m.x1, m.y2 - m.y1)   # tolerance: 20 % of the larger fragment
+            if m.cls == box.cls and box.x1 < m.x2 + pad and box.x2 > m.x1 - pad \
+                    and box.y1 < m.y2 + pad and box.y2 > m.y1 - pad:
+                merged[i] = (Box(m.cls, min(m.x1, box.x1), min(m.y1, box.y1),
+                                 max(m.x2, box.x2), max(m.y2, box.y2), max(m.score, box.score)),
+                             mf | filled)
+                break
+        else:
+            merged.append((box, filled))
+    return merged
 
 
 def apply_masks(frame: np.ndarray, masks: list[tuple[float, float, float, float]]) -> np.ndarray:
@@ -151,22 +215,33 @@ def apply_masks(frame: np.ndarray, masks: list[tuple[float, float, float, float]
 def label_frame(frame: np.ndarray, args: argparse.Namespace) -> list[Box]:
     frame = apply_masks(frame, args.mask)
     hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5, 5), 0), cv2.COLOR_BGR2HSV)
+    pads, free_tins = detect_pads(frame, args)
+    pads = merge_pads(pads)
     boxes: list[Box] = []
-    for box, filled in detect_circles(frame, args.min_circle_area, args.min_circularity):
+    for box, filled in pads:
         boxes.append(box)
-        if args.objects:
-            cmask = color_mask(hsv, CLASSES[box.cls])
-            boxes.extend(detect_objects(frame, filled, cmask, args.min_object_area, args.max_object_frac))
+        if args.tins:
+            cmask = color_mask(hsv, CLASSES[box.cls].split("_")[0])
+            boxes.extend(detect_tins_on_pad(hsv, filled, cmask, args.min_tin_area, args.max_tin_frac_pad))
+    if args.free_tins:
+        pad_union = np.zeros(frame.shape[:2], np.uint8)
+        for _, filled in pads:
+            pad_union |= filled
+        for t in free_tins:
+            if pad_union[(t.y1 + t.y2) // 2, (t.x1 + t.x2) // 2] == 0:
+                boxes.append(t)
     return boxes
 
 
 def draw(frame: np.ndarray, boxes: list[Box]) -> np.ndarray:
-    colors = {0: (0, 0, 255), 1: (0, 255, 0), 2: (255, 0, 0), 3: (0, 255, 255)}
+    colors = {"Red": (0, 0, 255), "Green": (0, 255, 0), "Blue": (255, 0, 0)}
     vis = frame.copy()
     for b in boxes:
-        cv2.rectangle(vis, (b.x1, b.y1), (b.x2, b.y2), colors.get(b.cls, (255, 255, 255)), 2)
-        cv2.putText(vis, CLASSES[b.cls], (b.x1, max(12, b.y1 - 4)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors.get(b.cls, (255, 255, 255)), 1, cv2.LINE_AA)
+        name = CLASSES[b.cls]
+        col = colors[name.split("_")[0]]
+        thick = 2 if name.endswith("_Rag") else 1
+        cv2.rectangle(vis, (b.x1, b.y1), (b.x2, b.y2), col, thick)
+        cv2.putText(vis, name, (b.x1, max(12, b.y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
     return vis
 
 
@@ -226,17 +301,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("inputs", nargs="+", help="video files or directories (searched recursively)")
     ap.add_argument("--out", default="labels_out", help="output directory (created; inputs are never touched)")
     ap.add_argument("--fps", type=float, default=2.0, help="frames per second to sample (0 = every frame)")
-    ap.add_argument("--objects", action="store_true", help="also label small objects placed on the circles")
+    ap.add_argument("--tins", action="store_true", help="also label the cans (*_Tin) sitting on pads; otherwise pads (*_Rag) only")
+    ap.add_argument("--free-tins", action="store_true",
+                    help="also label cans NOT on a pad (small saturated blobs). Off by default: red pavers in sunlight get labeled Red_Tin")
     ap.add_argument("--preview", action="store_true", help="write annotated preview images for QA")
     ap.add_argument("--keep-empty", action="store_true", help="also write frames with no detections")
     ap.add_argument("--mask", nargs="*", default=[], metavar="X1,Y1,X2,Y2",
-                    help="normalized rectangles to ignore, e.g. landing gear: --mask 0,0,0.06,0.07 0.94,0,1,0.07")
-    ap.add_argument("--min-circle-area", type=float, default=0.002,
-                    help="min circle area as fraction of the frame (default 0.002)")
+                    help="normalized rectangles to ignore, e.g. landing gear: --mask 0,0,0.1,0.1 0.9,0,1,0.1")
+    ap.add_argument("--min-pad-area", type=float, default=0.002,
+                    help="min pad (Rag) area as fraction of the frame (default 0.002)")
     ap.add_argument("--min-circularity", type=float, default=0.6)
-    ap.add_argument("--min-object-area", type=int, default=40, help="min object area in pixels")
-    ap.add_argument("--max-object-frac", type=float, default=0.25,
-                    help="max object area as fraction of its circle")
+    ap.add_argument("--min-tin-area", type=int, default=40, help="min tin area in pixels")
+    ap.add_argument("--max-tin-frac-pad", type=float, default=0.25,
+                    help="max tin area as fraction of the pad it sits on")
+    ap.add_argument("--max-tin-frac", type=float, default=0.004,
+                    help="max area of a tin not on a pad, as fraction of the frame")
     args = ap.parse_args(argv)
     try:
         args.mask = [tuple(float(v) for v in m.split(",")) for m in args.mask]
@@ -247,6 +326,8 @@ def main(argv: list[str] | None = None) -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "classes.txt").write_text("\n".join(CLASSES) + "\n", encoding="utf-8")
+    (out / "data.yaml").write_text(
+        f"path: {out.resolve()}\ntrain: images\nval: images\nnc: {len(CLASSES)}\nnames: {CLASSES}\n", encoding="utf-8")
 
     summary = [process_video(v, args) for v in iter_videos(args.inputs)]
     (out / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
