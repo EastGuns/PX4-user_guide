@@ -22,8 +22,8 @@ python3 tools/task3_train/eval_report.py runs/task3/weights/best.pt dataset_spli
 python3 tools/task3_train/review_video.py runs/task3/weights/best.pt 영상.mp4 --out review.mp4 --conf 0.4
 # 5) ONNX (opset 11, NMS 없음, 1x3x640x640) + Hailo end node 확인(model.23 = YOLO11 / model.22 = v8) + .pt 와 출력 대조
 python3 tools/task3_train/export_onnx.py runs/task3/weights/best.pt --out task3_yolo11n.onnx
-# 6) 양자화 캘리브레이션 이미지 (배포와 같은 640x640 letterbox)
-python3 tools/task3_train/make_calib.py dataset_split/images/train --out calib --n 256 --video 영상.mp4
+# 6) 양자화 캘리브레이션 이미지 (배포와 같은 640x640 letterbox, DFC 고급 최적화에 1024장 이상 필요)
+python3 tools/task3_train/make_calib.py dataset_split/images/train --out calib --n 1024 --video 영상.mp4
 # 7) Hailo .hef (DFC + hailo_model_zoo 가 있는 PC/도커에서)  → hailo/README.md
 bash tools/task3_train/hailo/compile.sh task3_yolo11n.onnx calib hailo10h     # 레시피(yolov11n/yolov8n)는 ONNX 에서 자동 판별
 ```

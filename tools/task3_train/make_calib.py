@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Hailo 양자화 캘리브레이션 이미지 세트를 만든다 (배포와 같은 640x640 letterbox, RGB 순서는 hailomz 가 처리).
 
-  python3 tools/task3_train/make_calib.py dataset_split/images/train --out calib --n 256 [--video 영상.mp4]
+  python3 tools/task3_train/make_calib.py dataset_split/images/train --out calib --n 1024 --video 영상.mp4
 
 학습 프레임(1280x720)을 tin_detective.py 와 같은 방식(긴 변 640, 114 회색 패딩, 가운데 정렬)으로 letterbox 한
 640x640 JPEG 를 저장한다. --video 를 주면 라벨링에 안 쓰인 중간 프레임도 섞어 n 장을 채운다.
@@ -20,7 +20,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('images', help='학습 이미지 폴더')
     ap.add_argument('--out', default='calib')
-    ap.add_argument('--n', type=int, default=256)
+    ap.add_argument('--n', type=int, default=1024, help='DFC 고급 최적화에는 1024장 이상 필요')
     ap.add_argument('--video', default=None, help='추가 프레임을 뽑을 영상')
     ap.add_argument('--imgsz', type=int, default=640)
     a = ap.parse_args()

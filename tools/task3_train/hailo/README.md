@@ -14,6 +14,8 @@ YOLO11 도 모델주에서 `meta_arch=yolov8` NMS 디코더를 쓰므로 출력 
   - Hailo-8/8L: DFC 3.x + 모델주 v2.x, HailoRT 4.x (3.30↔4.20, 3.31↔4.21).
 
 ## 컴파일
+캘리브레이션 이미지는 **1024장 이상** 권장: DFC 는 1024장 미만이면 고급 양자화 최적화(`--performance`, optimization_level 2)를 경고와 함께 낮은 단계로 내린다. `make_calib.py --n 1024 --video 영상.mp4` 로 영상 프레임을 섞어 채운다.
+
 ```bash
 # ONNX 와 캘리브레이션 이미지는 학습 쪽에서 만들어 둔 것 (export_onnx.py, make_calib.py)
 bash tools/task3_train/hailo/compile.sh task3_yolo11n.onnx calib/ hailo10h    # Hailo-8L 이면 hailo8l (DFC 3.x, 모델주 v2.x 에는 yolov11n 레시피가 v2.14 부터 있음)
