@@ -1,0 +1,8 @@
+# Task3 tin/rag YOLOv8n (6 클래스) — Hailo 모델주 yolov8n.alls 와 같고 NMS 설정만 6 클래스 json 으로 바꿈.
+# (hailomz compile 에 --classes 6 을 주면 모델주 기본 alls 로도 같은 결과가 나온다. 이 파일은 직접 DFC 를 쓸 때용.)
+normalization1 = normalization([0.0, 0.0, 0.0], [255.0, 255.0, 255.0])
+change_output_activation(conv42, sigmoid)
+change_output_activation(conv53, sigmoid)
+change_output_activation(conv63, sigmoid)
+nms_postprocess("yolov8n_task3_nms_config.json", meta_arch=yolov8, engine=cpu)
+allocator_param(width_splitter_defuse=disabled)
