@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Task3 YOLOv8n ONNX → Hailo .hef  (Hailo Dataflow Compiler + hailo_model_zoo 가 설치된 환경에서 실행)
 #
-#   bash tools/task3_train/hailo/compile.sh task3_yolov8n.onnx calib/ hailo8l
+#   bash tools/task3_train/hailo/compile.sh task3_yolov8n.onnx calib/ hailo10h
 #
-# 인자:  1) ONNX (export_onnx.py 출력)   2) 캘리브레이션 이미지 폴더 (make_calib.py 출력)   3) hw-arch: hailo8 | hailo8l
+# 인자:  1) ONNX (export_onnx.py 출력)   2) 캘리브레이션 이미지 폴더 (make_calib.py 출력)   3) hw-arch: hailo10h (파이 AI HAT+ 2 = Hailo-10H) | hailo8 | hailo8l
 #
-# ★ hef 는 칩(hailo8 / hailo8l) 과 파이의 HailoRT 버전에 맞는 DFC 로 컴파일해야 로드된다.
-#    DFC 3.27 ↔ HailoRT 4.17, 3.28 ↔ 4.18, 3.29 ↔ 4.19, 3.30 ↔ 4.20, 3.31 ↔ 4.21 (모델주 v2.11 ~ v2.15).
+# ★ hef 는 칩과 파이의 HailoRT 버전에 맞는 DFC 로 컴파일해야 로드된다.
+#    Hailo-10H: DFC 5.x + hailo_model_zoo master(v5.x) ↔ HailoRT 5.x (같은 메이저.마이너로 맞춤, 예: DFC 5.4.0 ↔ HailoRT 5.4.0).
+#    Hailo-8/8L: DFC 3.x + 모델주 v2.x ↔ HailoRT 4.x (3.30↔4.20, 3.31↔4.21).
 #    파이에서:  hailortcli fw-control identify   → Device Architecture 와 Firmware Version 확인.
 set -euo pipefail
-ONNX=${1:?ONNX 경로}; CALIB=${2:?캘리브레이션 이미지 폴더}; ARCH=${3:-hailo8l}
+ONNX=${1:?ONNX 경로}; CALIB=${2:?캘리브레이션 이미지 폴더}; ARCH=${3:-hailo10h}
 HERE=$(cd "$(dirname "$0")" && pwd)
 OUT=${OUT:-$(pwd)/hef_out}; mkdir -p "$OUT"
 NAME=tin_detector

@@ -5,4 +5,6 @@ change_output_activation(conv42, sigmoid)
 change_output_activation(conv53, sigmoid)
 change_output_activation(conv63, sigmoid)
 nms_postprocess("yolov8n_task3_nms_config.json", meta_arch=yolov8, engine=cpu)
-allocator_param(width_splitter_defuse=disabled)
+# Hailo-10H(DFC 5.x, 모델주 master 레시피):
+allocator_param(width_splitter_defuse=disabled, spatial_defuse_legacy=True)
+# Hailo-8/8L(DFC 3.x) 이면 위 줄 대신:  allocator_param(width_splitter_defuse=disabled)

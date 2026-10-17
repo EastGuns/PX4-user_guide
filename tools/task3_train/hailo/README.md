@@ -7,20 +7,22 @@ yolov8n 레시피처럼 정규화(/255)·sigmoid·`nms_postprocess(meta_arch=yol
 
 ## 필요한 것
 - Hailo Developer Zone 에서 받은 **Hailo AI Software Suite** docker (DFC + 모델주 포함) 또는 DFC whl + `hailo_model_zoo` 설치 (x86 리눅스, GPU 없어도 됨. 양자화·컴파일 10~30 분).
-- 파이의 HailoRT 버전과 짝이 맞는 DFC: `hailortcli fw-control identify` 로 칩(hailo8 / hailo8l)과 펌웨어 버전 확인.
-  DFC 3.27↔HailoRT 4.17, 3.28↔4.18, 3.29↔4.19, 3.30↔4.20, 3.31↔4.21.
+- 파이의 HailoRT 버전과 짝이 맞는 DFC: `hailortcli fw-control identify` 로 칩과 펌웨어 버전 확인.
+  - **Hailo-10H (라즈베리파이 AI HAT+ 2, 이 프로젝트의 칩)**: DFC **5.x** + `hailo_model_zoo` **master(v5.x)** 브랜치. HailoRT 도 5.x 이고
+    DFC 와 같은 버전으로 맞춘다(예: 파이 HailoRT 5.4.0 → DFC 5.4.0, 모델주 v5.1.0). 모델주 README 의 호환 안내: master 는 Hailo-10/15 전용.
+  - Hailo-8/8L: DFC 3.x + 모델주 v2.x, HailoRT 4.x (3.30↔4.20, 3.31↔4.21).
 
 ## 컴파일
 ```bash
 # ONNX 와 캘리브레이션 이미지는 학습 쪽에서 만들어 둔 것 (export_onnx.py, make_calib.py)
-bash tools/task3_train/hailo/compile.sh task3_yolov8n.onnx calib/ hailo8l     # 또는 hailo8
+bash tools/task3_train/hailo/compile.sh task3_yolov8n.onnx calib/ hailo10h    # Hailo-8L 이면 hailo8l
 ```
 직접 DFC 를 쓰려면 `yolov8n_task3.alls` + `yolov8n_task3_nms_config.json` 을 같은 폴더에 두고
 `hailo parser onnx ... --end-node-names (compile.sh 의 6개)` → `hailo optimize --calib-set-path ... --model-script yolov8n_task3.alls` → `hailo compiler` 순서.
 
 ## 파이에서 확인·교체
 ```bash
-hailortcli parse-hef tin_detector.hef          # 입력 640x640x3 UINT8, 출력 1개 (nms, 6 classes) 인지
+hailortcli parse-hef tin_detector.hef          # 입력 640x640x3 UINT8, 출력 1개 (nms, 6 classes), 아키텍처 HAILO10H 인지
 hailortcli run tin_detector.hef                # 로드/추론 되는지 (fps 출력)
 cp ~/models/tin_detector.hef ~/models/tin_detector.hef.bak_$(date +%m%d)   # 기존 모델 백업
 cp tin_detector.hef ~/models/tin_detector.hef  # HEF_PATH 기본값

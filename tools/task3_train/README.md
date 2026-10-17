@@ -25,7 +25,7 @@ python3 tools/task3_train/export_onnx.py runs/task3/weights/best.pt --out task3_
 # 6) 양자화 캘리브레이션 이미지 (배포와 같은 640x640 letterbox)
 python3 tools/task3_train/make_calib.py dataset_split/images/train --out calib --n 256 --video 영상.mp4
 # 7) Hailo .hef (DFC + hailo_model_zoo 가 있는 PC/도커에서)  → hailo/README.md
-bash tools/task3_train/hailo/compile.sh task3_yolov8n.onnx calib hailo8l
+bash tools/task3_train/hailo/compile.sh task3_yolov8n.onnx calib hailo10h
 ```
 
 ## 학습 설정 근거 (`train.py`)
@@ -43,4 +43,4 @@ bash tools/task3_train/hailo/compile.sh task3_yolov8n.onnx calib hailo8l
 
 ## 결과물
 - `runs/task3/weights/best.pt`, `task3_yolov8n.onnx`, `calib/`, `report/metrics.md`·`confusion_matrix.png`·`preview_val_pred.jpg`, `review.mp4`
-- `.hef` 는 Hailo DFC 가 있는 곳에서 `hailo/compile.sh` 로. 칩(hailo8/hailo8l)과 파이의 HailoRT 버전에 맞는 DFC 여야 한다 (`hailo/README.md`).
+- `.hef` 는 Hailo DFC 가 있는 곳에서 `hailo/compile.sh` 로. 칩(Hailo-10H → DFC 5.x/모델주 master)과 파이의 HailoRT 버전에 맞는 DFC 여야 한다 (`hailo/README.md`).
