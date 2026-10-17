@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Task3 tin/rag 검출기 전이학습 (Ultralytics YOLOv8n, imgsz 640).
+"""Task3 tin/rag 검출기 전이학습 (Ultralytics YOLO11n 기본, YOLOv8n 도 가능. imgsz 640).
 
   python3 tools/task3_train/train.py dataset_split/data.yaml --epochs 60 --out runs/task3
 
@@ -7,7 +7,7 @@
 - 배포(tin_detective.py)가 640 letterbox 로 추론하므로 imgsz 640. 캔이 6~20 px 라 더 줄이지 않는다.
 - 색이 곧 클래스(Red/Green/Blue)라 hue 증강(hsv_h)은 거의 끈다. 밝기·채도 증강은 그늘/햇빛 대응용으로 둔다.
 - 하방 카메라라 상하·좌우 뒤집기 모두 자연스러운 장면이므로 flipud/fliplr 를 켠다.
-- 시작 가중치는 기본 COCO 사전학습 yolov8n.pt. 기존 tin 모델 .pt 가 있으면 --weights 로 준다.
+- 시작 가중치는 기본 COCO 사전학습 yolo11n.pt (파이의 tin_detector.hef 가 YOLO11n). 기존 tin 모델 .pt 가 있으면 --weights 로 준다.
 """
 import argparse, os, shutil
 from ultralytics import YOLO
@@ -15,7 +15,7 @@ from ultralytics import YOLO
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('data', help='data.yaml (prepare_split.py 출력)')
-    ap.add_argument('--weights', default='yolov8n.pt', help='시작 가중치 (.pt). 기존 tin 모델로 이어 학습하려면 그 .pt')
+    ap.add_argument('--weights', default='yolo11n.pt', help='시작 가중치 (.pt): yolo11n.pt(기본, 파이에서 쓰는 세대) / yolov8n.pt. 기존 tin 모델로 이어 학습하려면 그 .pt')
     ap.add_argument('--epochs', type=int, default=60)
     ap.add_argument('--batch', type=int, default=8)
     ap.add_argument('--imgsz', type=int, default=640)

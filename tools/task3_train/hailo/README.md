@@ -2,7 +2,8 @@
 
 `tin_detective.py` 의 `HailoYOLO` 는 hef 출력이 **온칩 NMS 결과**(클래스별 `[ymin, xmin, ymax, xmax, score]` 정규화
 좌표, `HailoInfer(..., input_type="UINT8", output_type="FLOAT32")`) 라고 가정한다. 그래서 hef 는 모델주(hailomz)
-yolov8n 레시피처럼 정규화(/255)·sigmoid·`nms_postprocess(meta_arch=yolov8)` 를 모두 포함해야 하고 클래스 수는 6 이다.
+`yolov11n` 레시피(YOLO11n. v8n 이면 `yolov8n`)처럼 정규화(/255)·sigmoid·`nms_postprocess(meta_arch=yolov8)` 를 모두 포함해야 하고 클래스 수는 6 이다.
+YOLO11 도 모델주에서 `meta_arch=yolov8` NMS 디코더를 쓰므로 출력 형식은 v8 과 같다. 다른 점은 end node(Detect 헤드가 `model.23`)와 디코더 레이어 번호뿐이고, `compile.sh` 가 ONNX 를 보고 자동으로 고른다.
 클래스 순서는 `data.yaml` = `NAMES = ['Blue_Rag','Blue_Tin','Green_Rag','Green_Tin','Red_Rag','Red_Tin']` 이다.
 
 ## 필요한 것
@@ -15,10 +16,10 @@ yolov8n 레시피처럼 정규화(/255)·sigmoid·`nms_postprocess(meta_arch=yol
 ## 컴파일
 ```bash
 # ONNX 와 캘리브레이션 이미지는 학습 쪽에서 만들어 둔 것 (export_onnx.py, make_calib.py)
-bash tools/task3_train/hailo/compile.sh task3_yolov8n.onnx calib/ hailo10h    # Hailo-8L 이면 hailo8l
+bash tools/task3_train/hailo/compile.sh task3_yolo11n.onnx calib/ hailo10h    # Hailo-8L 이면 hailo8l (DFC 3.x, 모델주 v2.x 에는 yolov11n 레시피가 v2.14 부터 있음)
 ```
-직접 DFC 를 쓰려면 `yolov8n_task3.alls` + `yolov8n_task3_nms_config.json` 을 같은 폴더에 두고
-`hailo parser onnx ... --end-node-names (compile.sh 의 6개)` → `hailo optimize --calib-set-path ... --model-script yolov8n_task3.alls` → `hailo compiler` 순서.
+직접 DFC 를 쓰려면 `yolov11n_task3.alls` + `yolov11n_task3_nms_config.json`(v8 은 `yolov8n_*`)을 같은 폴더에 두고
+`hailo parser onnx ... --end-node-names (compile.sh 의 6개)` → `hailo optimize --calib-set-path ... --model-script yolov11n_task3.alls` → `hailo compiler` 순서.
 
 ## 파이에서 확인·교체
 ```bash
