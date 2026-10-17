@@ -4,6 +4,11 @@
   python3 tools/task3_train/eval_report.py runs/task3/weights/best.pt dataset_split/data.yaml --out report
 """
 import argparse, glob, os, random, shutil
+
+def label_path(img_path):
+    """images/<split>/x.jpg → labels/<split>/x.txt (윈도우 역슬래시 경로도 처리)"""
+    d, f = os.path.split(img_path); d2, split = os.path.split(d); root, _ = os.path.split(d2)
+    return os.path.join(root, 'labels', split, os.path.splitext(f)[0] + '.txt')
 import cv2, numpy as np, yaml
 from ultralytics import YOLO
 
@@ -24,7 +29,7 @@ def main():
     # 라벨 파일에서 클래스별 인스턴스/이미지 수
     nt_c = np.zeros(len(names), int); nt_i = np.zeros(len(names), int)
     for p_ in imgs_all:
-        lab = p_.replace('/images/', '/labels/').rsplit('.', 1)[0] + '.txt'
+        lab = label_path(p_)
         seen = set()
         if os.path.exists(lab):
             for l in open(lab):
@@ -43,13 +48,15 @@ def main():
         src = os.path.join(a.out, 'val', fn)
         if os.path.exists(src): shutil.copy2(src, os.path.join(a.out, fn))
 
-    # 예측(실선) vs 라벨(점선) 미리보기
+    # 예측(실선) vs 라벨(점선) 미리보기 — val 직후 같은 모델로 predict 하면 ultralytics 8.4 에서
+    # 'Inference tensors do not track version counter' 오류가 나서 가중치를 다시 읽는다.
+    model = YOLO(a.weights)
     imgs = list(imgs_all)
     random.Random(1).shuffle(imgs); imgs = sorted(imgs[:a.n_preview])
     tiles = []
     for p in imgs:
         img = cv2.imread(p); H, W = img.shape[:2]
-        lab = p.replace('/images/', '/labels/').rsplit('.', 1)[0] + '.txt'
+        lab = label_path(p)
         if os.path.exists(lab):
             for l in open(lab):
                 c, cx, cy, w, h = l.split(); cx, cy, w, h = float(cx) * W, float(cy) * H, float(w) * W, float(h) * H
