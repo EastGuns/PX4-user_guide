@@ -6,9 +6,13 @@
 import argparse, glob, os, random, shutil
 
 def label_path(img_path):
-    """images/<split>/x.jpg → labels/<split>/x.txt (윈도우 역슬래시 경로도 처리)"""
-    d, f = os.path.split(img_path); d2, split = os.path.split(d); root, _ = os.path.split(d2)
-    return os.path.join(root, 'labels', split, os.path.splitext(f)[0] + '.txt')
+    """이미지 경로의 마지막 'images' 폴더를 'labels' 로 바꾼다 (images/<split>/x.jpg 와 Roboflow 의 <split>/images/x.jpg 둘 다, 윈도우 경로 포함)."""
+    parts = os.path.normpath(img_path).split(os.sep)
+    for i in range(len(parts) - 1, -1, -1):
+        if parts[i] == 'images':
+            parts[i] = 'labels'; break
+    parts[-1] = os.path.splitext(parts[-1])[0] + '.txt'
+    return os.sep.join(parts)
 import cv2, numpy as np, yaml
 from ultralytics import YOLO
 
