@@ -1,0 +1,950 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Task3 클릭 라벨러</title>
+<style>
+/* Layout: fixed stage on the left (frame + boxes), tool panel on the right; stacks at phone width. */
+:root {
+  --bg: #f3f4f1; --panel: #ffffff; --fg: #1d2420; --muted: #5b655f; --line: #d6dad4;
+  --accent: #2f6f5e; --accent-fg: #ffffff; --warn: #b45309; --danger: #b42318; --ok: #15803d;
+  --stage: #11161a; --chip: #e8ebe6;
+  --red: #e5484d; --green: #30a46c; --blue: #3b82f6;
+  --font: system-ui, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+  --mono: ui-monospace, Consolas, "D2Coding", monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #15191c; --panel: #1e2428; --fg: #e6e9e4; --muted: #9aa49e; --line: #343c41;
+  --accent: #5fb39b; --accent-fg: #0f1a16; --warn: #f0a04b; --danger: #f87171; --ok: #4ade80;
+  --stage: #0a0d10; --chip: #2a3237; color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #15191c; --panel: #1e2428; --fg: #e6e9e4; --muted: #9aa49e; --line: #343c41;
+  --accent: #5fb39b; --accent-fg: #0f1a16; --warn: #f0a04b; --danger: #f87171; --ok: #4ade80;
+  --stage: #0a0d10; --chip: #2a3237; color-scheme: dark; }
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--fg); font: 14px/1.45 var(--font); display: flex; flex-direction: column;
+  padding-left: max(0px, env(safe-area-inset-left, 0px)); padding-right: max(0px, env(safe-area-inset-right, 0px)); }
+header { display: flex; align-items: center; gap: 12px; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+header h1 { font-size: 16px; margin: 0; font-weight: 700; letter-spacing: -0.01em; }
+.steps { display: flex; gap: 6px; flex-wrap: wrap; }
+.step { font-size: 12px; padding: 2px 9px; border-radius: 999px; background: var(--chip); color: var(--muted); }
+.step.on { background: var(--accent); color: var(--accent-fg); }
+.banner { font-size: 12px; color: var(--warn); margin-left: auto; }
+main { flex: 1; display: grid; grid-template-columns: 1fr 340px; min-height: 0; }
+#stage { position: relative; background: var(--stage); min-width: 0; min-height: 320px; display: flex; flex-direction: column; }
+#cv { flex: 1; width: 100%; height: 100%; display: block; cursor: crosshair; touch-action: none; }
+#cv.grab { cursor: move; }
+#cv.resize { cursor: nwse-resize; }
+#stageinfo { position: absolute; left: 10px; top: 8px; font: 12px var(--mono); color: #e8ecef; background: rgba(0,0,0,.45); padding: 2px 8px; border-radius: 4px; pointer-events: none; }
+#hint { font-size: 12px; color: #c3cad0; background: rgba(0,0,0,.55); padding: 5px 10px; line-height: 1.5; }
+#hint b { color: #fff; font-weight: 600; }
+#empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #8d98a0; font-size: 14px; text-align: center; padding: 24px; pointer-events: none; }
+aside { background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; padding: 10px 12px 24px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.card h2 { font-size: 13px; margin: 0; display: flex; align-items: center; gap: 8px; }
+.card h2 .n { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--accent); color: var(--accent-fg); font-size: 12px; }
+.card.off { opacity: .55; }
+.row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.row label { color: var(--muted); font-size: 12px; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 12px; color: var(--muted); }
+.kv b { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }
+input[type=number], input[type=text], input[type=password], select { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 7px; min-width: 0; }
+input[type=number] { width: 84px; font-variant-numeric: tabular-nums; }
+input[type=range] { width: 100%; }
+button { font: inherit; border: 1px solid var(--line); background: var(--chip); color: var(--fg); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 600; }
+button.mode { flex: 1; padding: 8px 6px; font-weight: 600; }
+button.mode.on { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+button.small { padding: 2px 7px; font-size: 12px; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.file { display: block; }
+.file input { display: none; }
+.file span { display: inline-block; border: 1px dashed var(--accent); border-radius: 6px; padding: 8px 10px; cursor: pointer; width: 100%; text-align: center; color: var(--accent); font-weight: 600; }
+.prog { height: 6px; background: var(--chip); border-radius: 3px; overflow: hidden; }
+.prog i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .15s; }
+.msg { font-size: 12px; color: var(--muted); white-space: pre-wrap; word-break: break-all; }
+.msg.err { color: var(--danger); }
+.msg.ok { color: var(--ok); }
+#notes { display: flex; flex-direction: column; gap: 4px; max-height: 180px; overflow-y: auto; }
+.nt { display: grid; grid-template-columns: 22px 1fr auto; gap: 6px; align-items: center; font-size: 12px; padding: 3px 6px; border-radius: 5px; cursor: pointer; }
+.nt:hover { background: var(--chip); }
+.nt b { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: #facc15; color: #000; font-size: 11px; }
+.nt span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#boxes { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; }
+.bx { display: grid; grid-template-columns: 10px 1fr auto auto; gap: 6px; align-items: center; font-size: 12px; padding: 3px 6px; border-radius: 5px; border: 1px solid transparent; cursor: pointer; }
+.bx.sel { border-color: var(--accent); background: var(--chip); }
+.bx i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.bx select { font-size: 12px; padding: 1px 4px; }
+.bx .sz { color: var(--muted); font: 11px var(--mono); }
+#mag { width: 100%; aspect-ratio: 1; max-width: 100%; background: var(--stage); border-radius: 6px; image-rendering: pixelated; }
+.keys { font-size: 11px; color: var(--muted); line-height: 1.6; }
+kbd { font: 11px var(--mono); background: var(--chip); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+details summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.flag { color: var(--warn); }
+@media (max-width: 820px) {
+  main { grid-template-columns: 1fr; grid-template-rows: 55vh 1fr; }
+  aside { border-left: 0; border-top: 1px solid var(--line); }
+}
+@media (prefers-reduced-motion: reduce) { .prog i { transition: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Task3 클릭 라벨러</h1>
+  <div class="steps"><span class="step on" id="st1">1 불러오기</span><span class="step" id="st2">2 자르기</span><span class="step" id="st3">3 클릭 라벨링</span><span class="step" id="st4">4 내보내기</span></div>
+  <div class="banner" id="banner" hidden>미리보기 창: Roboflow 업로드는 이 창에서 막힙니다. HTML 파일을 Chrome에서 직접 열면 전부 됩니다.</div>
+</header>
+<main>
+  <section id="stage">
+    <div id="stageinfo" hidden></div>
+    <canvas id="cv"></canvas>
+    <div id="empty">왼쪽 아래 설명대로 영상을 불러오고 프레임을 자르면<br>여기에 프레임이 나타납니다.<br><br>그 다음 캔 위를 클릭하면 Tin 박스, 패드 위를 클릭하면 Rag 박스가 생기고<br>색(Red/Green/Blue)은 HSV로 자동 판정됩니다.</div>
+    <div id="hint"><b>클릭</b> 현재 모드로 자동 박스 · <b>Shift+드래그</b> 수동 박스 · <b>드래그</b> 박스 이동/모서리 조절 · <b>우클릭</b> 삭제 · <b>T</b>/<b>R</b> 모드 · <b>←</b>/<b>→</b> 프레임 · <b>1 2 3</b> 선택 박스 색 Red/Green/Blue · <b>Q</b> Tin↔Rag · <b>C</b> 이전 프레임 박스 가져오기(재탐지) · <b>Ctrl+Z</b> 되돌리기</div>
+  </section>
+  <aside>
+    <div class="card" id="p1">
+      <h2><span class="n">1</span>영상 불러오기</h2>
+      <label class="file"><input type="file" id="fvideo" accept="video/*"><span>영상 파일 선택 (mp4 등)</span></label>
+      <label class="file"><input type="file" id="fimages" accept="image/*" multiple><span>또는 이미 잘라둔 이미지 여러 장 선택</span></label>
+      <div class="kv" id="srcinfo" hidden></div>
+      <div class="row" id="restore" hidden><button class="small primary" id="brestore">이전 작업 복원</button><span class="msg" id="restoremsg"></span></div>
+    </div>
+    <div class="card off" id="p2">
+      <h2><span class="n">2</span>프레임 자르기</h2>
+      <div class="row">
+        <select id="cutmode"><option value="interval">간격(초)마다</option><option value="fps">초당 N장(fps)</option><option value="count">총 N장</option></select>
+        <input type="number" id="cutval" value="0.5" min="0.01" step="0.1">
+      </div>
+      <div class="row"><label>시작(초)</label><input type="number" id="tstart" value="0" min="0" step="0.1"><label>끝(초)</label><input type="number" id="tend" value="0" min="0" step="0.1"></div>
+      <div class="kv"><span>예상 장수</span><b id="ncount">-</b><span>JPEG 품질</span><b><input type="number" id="jpgq" value="92" min="50" max="100" step="1" style="width:64px"></b></div>
+      <button class="primary" id="bextract" disabled>프레임 추출 시작</button>
+      <div class="prog"><i id="extprog"></i></div>
+      <div class="msg" id="extmsg"></div>
+    </div>
+    <div class="card off" id="p3">
+      <h2><span class="n">3</span>클릭 라벨링</h2>
+      <div class="row"><button class="mode on" id="mtin">Tin (캔) <kbd>T</kbd></button><button class="mode" id="mrag">Rag (패드) <kbd>R</kbd></button></div>
+      <div class="row"><button class="small" id="bprev">◀ 이전</button><input type="number" id="fidx" value="1" min="1" style="width:70px"><span class="msg" id="ftotal">/ 0</span><button class="small" id="bnext">다음 ▶</button><button class="small" id="bnextun">미라벨로</button></div>
+      <input type="range" id="fslider" min="0" max="0" value="0">
+      <div class="kv"><span>라벨된 프레임</span><b id="nlabeled">0</b><span>박스 합계</span><b id="nboxes">0</b></div>
+      <div id="boxes"></div>
+      <div class="row"><button class="small" id="bcopy">이전 프레임 박스 가져오기 <kbd>C</kbd></button><button class="small" id="bclear">이 프레임 비우기</button></div>
+      <canvas id="mag" width="180" height="180"></canvas>
+      <details><summary>탐지 설정</summary>
+        <div class="kv">
+          <span>Tin 최대 크기(px)</span><b><input type="number" id="maxtin" value="120" min="20" step="10"></b>
+          <span>Rag 최대 크기(px)</span><b><input type="number" id="maxrag" value="700" min="60" step="20"></b>
+        </div>
+        <div class="keys">색 판정 HSV(OpenCV 스케일): Red H 0–12/165–179, Green 40–90, Blue 95–135. 패드 성장: 같은 색상대 + S≥200 + V≥60, 그림자 부분은 원 안에서 S≥150·V≥30으로 보강. 캔 성장: 클릭 지점 밝기 기준 ±허용치, 패드보다 어두운 같은 색 캔도 분리.</div>
+      </details>
+    </div>
+    <div class="card off" id="p4">
+      <h2><span class="n">4</span>내보내기</h2>
+      <div class="row"><label><input type="checkbox" id="inclempty"> 라벨 없는 프레임도 포함</label></div>
+      <button class="primary" id="bzip">YOLO zip 저장 (images/labels/data.yaml)</button>
+      <div class="msg" id="zipmsg"></div>
+      <details id="rfbox" open>
+        <summary>Roboflow 업로드</summary>
+        <div class="kv" style="margin-top:6px">
+          <span>Private API Key</span><b><input type="password" id="rfkey" placeholder="세션 동안만 기억" autocomplete="off"></b>
+          <span>프로젝트 ID</span><b><input type="text" id="rfproj" value="my-first-project-ns7ou"></b>
+          <span>배치 이름</span><b><input type="text" id="rfbatch"></b>
+          <span>split</span><b><select id="rfsplit"><option>train</option><option>valid</option><option>test</option></select></b>
+        </div>
+        <div class="row"><button class="primary" id="brf">라벨된 프레임 업로드</button><button class="small" id="brfstop" hidden>중지</button></div>
+        <div class="prog"><i id="rfprog"></i></div>
+        <div class="msg" id="rfmsg"></div>
+      </details>
+      <div class="msg">저장은 항상 새 파일(zip)로만 하고 원본 영상은 건드리지 않습니다. 라벨은 이 브라우저에 자동 저장되어 새로고침해도 남습니다.</div>
+    </div>
+    <div class="card off" id="p5">
+      <h2><span class="n">5</span>점검 영상 · 메모</h2>
+      <div class="row"><button class="mode" id="breview">점검 모드 켜기</button></div>
+      <div class="row"><button class="small" id="bplay">▶ 재생</button><label>속도(fps)</label><input type="number" id="pfps" value="2" min="0.2" step="0.5" style="width:64px"><label><input type="checkbox" id="ponlylab" checked> 라벨 있는 프레임만</label></div>
+      <div class="msg">박스를 그린 프레임이 왼쪽 아래 번호와 함께 재생됩니다. 이상한 곳이 보이면 화면을 클릭하세요. 재생이 멈추고, 한 번 더 클릭한 지점에 메모 핀이 생깁니다.</div>
+      <div class="row" id="noteedit" hidden><input type="text" id="notetext" placeholder="무엇이 이상한지 (예: 초록 캔 박스가 그림자까지 포함)" style="flex:1"><button class="small primary" id="bnotesave">저장</button></div>
+      <div id="notes"></div>
+      <div class="row"><button class="primary" id="bnotezip">메모+이미지 내보내기 (zip)</button><button class="small" id="bwebm">점검 영상 WebM 저장</button></div>
+      <label class="file"><input type="file" id="fimport" accept=".txt" multiple><span>수정된 라벨 txt 가져오기</span></label>
+      <div class="msg" id="notemsg"></div>
+      <div class="msg">내보낸 zip을 Claude 스레드에 올리고 "메모 분석해서 라벨 고쳐줘"라고 쓰면, 돌아온 labels/*.txt를 위 버튼으로 다시 불러올 수 있습니다.</div>
+    </div>
+  </aside>
+</main>
+<script>
+(() => {
+'use strict';
+// ---------- constants (ported from tools/task3_autolabel/autolabel.py) ----------
+const CLASSES = ['Blue_Rag', 'Blue_Tin', 'Green_Rag', 'Green_Tin', 'Red_Rag', 'Red_Tin'];
+const COLORS = ['Red', 'Green', 'Blue'];
+const SWATCH = { Red: '#e5484d', Green: '#30a46c', Blue: '#3b82f6' };
+// hue bands used to name a tin (no V floor: dark cans)
+const TIN_HUE = { Red: [[0, 12], [165, 179]], Green: [[40, 90]], Blue: [[95, 135]] };
+// strict pad hue bands (board stains sit at H ~ 100)
+const PAD_HUE = { Red: [[0, 8], [170, 179]], Green: [[45, 80]], Blue: [[106, 130]] };
+const PAD_S_STRICT = 235, PAD_V_STRICT = 110;   // autolabel HSV_RANGES: the strict mask that seeds a pad
+const PAD_S = 200, PAD_V = 60;                  // relaxed floors (RELAXED_S_FLOOR / SHADOW_V_FLOOR) used only inside the pad's own circle
+const TIN_V_MIN = 3;
+
+const $ = id => document.getElementById(id);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const inBands = (h, bands) => { for (const b of bands) if (h >= b[0] && h <= b[1]) return true; return false; };
+const clsId = (c, k) => CLASSES.indexOf(c + '_' + k);
+
+// ---------- state ----------
+const S = {
+  src: null,            // {kind:'video'|'images', name, base, size, duration, w, h, file, files}
+  frames: [],           // {name, t, blob, w, h}
+  labels: {},           // name -> [{k:'Tin'|'Rag', c:'Red'|'Green'|'Blue', x1,y1,x2,y2, flag}]
+  uploaded: {},         // name -> roboflow image id
+  idx: 0, mode: 'Tin', sel: -1,
+  notes: [],            // {i, x, y, text}
+  review: false, playing: false, timer: 0, pendingPin: null,
+  hist: {},             // name -> [json]
+  bitmaps: new Map(), hsv: new Map(),
+  storeKey: null, rfAbort: false,
+};
+const video = document.createElement('video'); video.muted = true; video.playsInline = true; video.preload = 'auto';
+const cv = $('cv'), ctx = cv.getContext('2d');
+const mag = $('mag'), mctx = mag.getContext('2d');
+const inFrame = (() => { try { return window.self !== window.top; } catch (e) { return true; } })();
+if (inFrame) $('banner').hidden = false;
+
+// ---------- storage ----------
+const lsGet = k => { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
+let saveTimer = 0;
+function save() {
+  if (!S.storeKey) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => lsSet(S.storeKey, {
+    cfg: cutCfg(), names: S.frames.map(f => f.name), labels: S.labels, uploaded: S.uploaded, notes: S.notes, idx: S.idx, savedAt: Date.now(),
+  }), 300);
+}
+
+// ---------- source loading ----------
+function setStep(n) { for (let i = 1; i <= 4; i++) { $('st' + i).classList.toggle('on', i === n); $('p' + i).classList.toggle('off', i > n && n < 3 ? true : false); } }
+function sanitize(s) { return s.replace(/\.[^.]+$/, '').replace(/[^\w\-가-힣]+/g, '_').slice(0, 60) || 'video'; }
+
+$('fvideo').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) return;
+  resetAll();
+  $('extmsg').textContent = '영상 정보를 읽는 중...';
+  video.src = URL.createObjectURL(f);
+  await new Promise((res, rej) => { video.onloadedmetadata = res; video.onerror = () => rej(new Error('브라우저가 이 영상을 열지 못했습니다 (코덱 미지원). mp4/H.264로 변환해 주세요.')); }).catch(err => { $('extmsg').textContent = err.message; });
+  if (!video.videoWidth) return;
+  S.src = { kind: 'video', name: f.name, base: sanitize(f.name), size: f.size, duration: video.duration, w: video.videoWidth, h: video.videoHeight, file: f };
+  S.storeKey = 't3click:' + f.name + ':' + f.size;
+  $('srcinfo').hidden = false;
+  $('srcinfo').innerHTML = `<span>파일</span><b>${esc(f.name)}</b><span>길이</span><b>${video.duration.toFixed(2)} 초</b><span>해상도</span><b>${video.videoWidth} × ${video.videoHeight}</b><span>크기</span><b>${(f.size / 1048576).toFixed(1)} MB</b>`;
+  $('tend').value = video.duration.toFixed(2); $('tstart').value = 0;
+  $('bextract').disabled = false; $('extmsg').textContent = '';
+  setStep(2); updateCount();
+  const saved = lsGet(S.storeKey);
+  if (saved && saved.names && saved.names.length) {
+    $('restore').hidden = false;
+    const nl = Object.values(saved.labels || {}).filter(a => a.length).length;
+    $('restoremsg').textContent = `${new Date(saved.savedAt).toLocaleString()} 저장 · ${saved.names.length}프레임 · 라벨 ${nl}프레임`;
+    $('brestore').onclick = async () => { applyCfg(saved.cfg); await extract(); S.labels = saved.labels || {}; S.uploaded = saved.uploaded || {}; S.notes = saved.notes || []; S.idx = clamp(saved.idx || 0, 0, S.frames.length - 1); $('restore').hidden = true; startLabeling(); };
+  }
+});
+
+$('fimages').addEventListener('change', async e => {
+  const files = [...e.target.files].filter(f => /^image\//.test(f.type)).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  if (!files.length) return;
+  resetAll();
+  const bm = await createImageBitmap(files[0]);
+  S.src = { kind: 'images', name: files[0].name, base: sanitize(files[0].name), size: files.length, duration: 0, w: bm.width, h: bm.height, files };
+  S.storeKey = 't3click:images:' + files.length + ':' + files[0].name + ':' + files[files.length - 1].name;
+  S.frames = files.map((f, i) => ({ name: f.name, t: i, blob: f, w: 0, h: 0 }));
+  $('srcinfo').hidden = false;
+  $('srcinfo').innerHTML = `<span>이미지</span><b>${files.length} 장</b><span>해상도</span><b>${bm.width} × ${bm.height}</b>`;
+  const saved = lsGet(S.storeKey);
+  if (saved) { S.labels = saved.labels || {}; S.uploaded = saved.uploaded || {}; S.notes = saved.notes || []; S.idx = clamp(saved.idx || 0, 0, files.length - 1); }
+  startLabeling();
+});
+
+function resetAll() {
+  S.frames = []; S.labels = {}; S.uploaded = {}; S.notes = []; S.idx = 0; S.sel = -1; S.hist = {}; S.bitmaps.clear(); S.hsv.clear();
+  if (S.review) setReview(false); stopPlay(); $('notes').innerHTML = ''; $('notemsg').textContent = '';
+  $('restore').hidden = true; $('boxes').innerHTML = ''; $('zipmsg').textContent = ''; $('rfmsg').textContent = '';
+}
+
+// ---------- cutting ----------
+function cutCfg() { return { mode: $('cutmode').value, val: +$('cutval').value, start: +$('tstart').value, end: +$('tend').value, q: +$('jpgq').value }; }
+function applyCfg(c) { if (!c) return; $('cutmode').value = c.mode; $('cutval').value = c.val; $('tstart').value = c.start; $('tend').value = c.end; if (c.q) $('jpgq').value = c.q; updateCount(); }
+function plan() {
+  if (!S.src || S.src.kind !== 'video') return [];
+  const c = cutCfg(); const dur = S.src.duration;
+  const t0 = clamp(c.start, 0, dur), t1 = clamp(c.end || dur, t0, dur);
+  let step;
+  if (c.mode === 'interval') step = Math.max(0.01, c.val);
+  else if (c.mode === 'fps') step = 1 / Math.max(0.01, c.val);
+  else step = (t1 - t0) / Math.max(1, Math.round(c.val));
+  const ts = [];
+  if (c.mode === 'count') { const n = Math.max(1, Math.round(c.val)); for (let i = 0; i < n; i++) ts.push(t0 + (i + 0.5) * step); }
+  else for (let t = t0; t <= t1 + 1e-6 && ts.length < 5000; t += step) ts.push(t);
+  return ts.map(t => Math.min(t, Math.max(0, dur - 0.001)));
+}
+function updateCount() { const n = plan().length; $('ncount').textContent = n ? n + ' 장' + (n > 1500 ? ' (너무 많음: 1500장 이하 권장)' : '') : '-'; }
+['cutmode', 'cutval', 'tstart', 'tend'].forEach(id => $(id).addEventListener('input', updateCount));
+$('cutmode').addEventListener('change', () => { const m = $('cutmode').value; $('cutval').value = m === 'interval' ? 0.5 : m === 'fps' ? 2 : 100; $('cutval').step = m === 'count' ? 1 : 0.1; updateCount(); });
+
+$('bextract').addEventListener('click', async () => { await extract(); startLabeling(); });
+
+async function extract() {
+  const ts = plan(); if (!ts.length) return;
+  $('bextract').disabled = true; S.frames = []; S.bitmaps.clear(); S.hsv.clear();
+  const W = S.src.w, H = S.src.h;
+  const oc = document.createElement('canvas'); oc.width = W; oc.height = H; const octx = oc.getContext('2d', { willReadFrequently: false });
+  const q = clamp(+$('jpgq').value || 92, 50, 100) / 100;
+  const pad = String(ts.length).length < 4 ? 4 : String(ts.length).length;
+  const t00 = performance.now();
+  for (let i = 0; i < ts.length; i++) {
+    await seekTo(ts[i]);
+    octx.drawImage(video, 0, 0, W, H);
+    const blob = await new Promise(r => oc.toBlob(r, 'image/jpeg', q));
+    S.frames.push({ name: `${S.src.base}_${String(i + 1).padStart(pad, '0')}.jpg`, t: ts[i], blob, w: W, h: H });
+    if (i % 3 === 0 || i === ts.length - 1) {
+      $('extprog').style.width = (100 * (i + 1) / ts.length) + '%';
+      $('extmsg').textContent = `${i + 1} / ${ts.length} 장 추출 중 (${((performance.now() - t00) / 1000).toFixed(0)}초)`;
+      await new Promise(r => setTimeout(r, 0));
+    }
+  }
+  $('extmsg').textContent = `${S.frames.length} 장 추출 완료 (${W}×${H}, ${(S.frames.reduce((a, f) => a + f.blob.size, 0) / 1048576).toFixed(1)} MB)`;
+  $('bextract').disabled = false;
+  save();
+}
+function seekTo(t) {
+  return new Promise(res => {
+    if (Math.abs(video.currentTime - t) < 1e-4 && video.readyState >= 2) { res(); return; }
+    const done = () => {
+      video.removeEventListener('seeked', done);
+      // wait for the seeked frame to be presented, but never hang (headless / background tabs may not fire rVFC)
+      let fin = false; const ok = () => { if (!fin) { fin = true; res(); } };
+      if ('requestVideoFrameCallback' in video) video.requestVideoFrameCallback(ok);
+      setTimeout(ok, 120);
+    };
+    video.addEventListener('seeked', done); video.currentTime = t;
+  });
+}
+
+function startLabeling() {
+  if (!S.frames.length) return;
+  setStep(3); $('p4').classList.remove('off'); $('p5').classList.remove('off'); $('empty').hidden = true;
+  if (S.src.kind === 'video') { const c = cutCfg(); const fps = c.mode === 'fps' ? c.val : c.mode === 'interval' ? 1 / c.val : S.frames.length / Math.max(0.1, (c.end || S.src.duration) - c.start); $('pfps').value = Math.max(0.2, Math.round(fps * 10) / 10); }
+  renderNotes();
+  $('fslider').max = S.frames.length - 1; $('fidx').max = S.frames.length; $('ftotal').textContent = '/ ' + S.frames.length;
+  if (!$('rfbatch').value) $('rfbatch').value = 'task3_click_' + new Date().toISOString().slice(0, 10);
+  showFrame(S.idx);
+}
+
+// ---------- frame pixels / HSV ----------
+async function bitmapOf(i) {
+  if (S.bitmaps.has(i)) return S.bitmaps.get(i);
+  const bm = await createImageBitmap(S.frames[i].blob);
+  S.frames[i].w = bm.width; S.frames[i].h = bm.height;
+  S.bitmaps.set(i, bm);
+  if (S.bitmaps.size > 8) { const k = S.bitmaps.keys().next().value; if (k !== S.idx) { S.bitmaps.get(k).close(); S.bitmaps.delete(k); } }
+  return bm;
+}
+async function hsvOf(i) {
+  if (S.hsv.has(i)) return S.hsv.get(i);
+  const bm = await bitmapOf(i);
+  const w = bm.width, h = bm.height;
+  const oc = document.createElement('canvas'); oc.width = w; oc.height = h;
+  const c2 = oc.getContext('2d', { willReadFrequently: true }); c2.drawImage(bm, 0, 0);
+  const d = c2.getImageData(0, 0, w, h).data;
+  const out = buildHSV(d, w, h);
+  S.hsv.set(i, out);
+  if (S.hsv.size > 3) { const k = S.hsv.keys().next().value; if (k !== i) S.hsv.delete(k); }
+  return out;
+}
+// 5-tap gaussian blur (like autolabel's 5x5 GaussianBlur) then OpenCV-scale HSV (H 0-179, S/V 0-255)
+function buildHSV(d, w, h) {
+  const n = w * h, R = new Float32Array(n), G = new Float32Array(n), B = new Float32Array(n);
+  const tR = new Float32Array(n), tG = new Float32Array(n), tB = new Float32Array(n);
+  const k = [1, 4, 6, 4, 1];
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let r = 0, g = 0, b = 0;
+    for (let j = -2; j <= 2; j++) { const xx = clamp(x + j, 0, w - 1), p = (y * w + xx) * 4, kk = k[j + 2]; r += d[p] * kk; g += d[p + 1] * kk; b += d[p + 2] * kk; }
+    const i = y * w + x; tR[i] = r / 16; tG[i] = g / 16; tB[i] = b / 16;
+  }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let r = 0, g = 0, b = 0;
+    for (let j = -2; j <= 2; j++) { const yy = clamp(y + j, 0, h - 1), p = yy * w + x, kk = k[j + 2]; r += tR[p] * kk; g += tG[p] * kk; b += tB[p] * kk; }
+    const i = y * w + x; R[i] = r / 16; G[i] = g / 16; B[i] = b / 16;
+  }
+  const H = new Uint8Array(n), Sa = new Uint8Array(n), V = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const r = R[i], g = G[i], b = B[i];
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b), df = mx - mn;
+    V[i] = Math.round(mx); Sa[i] = mx > 0 ? Math.round(df * 255 / mx) : 0;
+    let hh = 0;
+    if (df > 0) { if (mx === r) hh = 60 * ((g - b) / df); else if (mx === g) hh = 120 + 60 * ((b - r) / df); else hh = 240 + 60 * ((r - g) / df); if (hh < 0) hh += 360; }
+    H[i] = Math.min(179, Math.round(hh / 2));
+  }
+  return { w, h, H, S: Sa, V };
+}
+
+// ---------- click -> box ----------
+function voteColor(P, cx, cy, r, sMin, vMin, bandsSet) {
+  const votes = { Red: 0, Green: 0, Blue: 0 }; let tot = 0;
+  const x0 = clamp(cx - r, 0, P.w - 1), x1 = clamp(cx + r, 0, P.w - 1), y0 = clamp(cy - r, 0, P.h - 1), y1 = clamp(cy + r, 0, P.h - 1);
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    if ((x - cx) ** 2 + (y - cy) ** 2 > r * r) continue;
+    const i = y * P.w + x; if (P.S[i] < sMin || P.V[i] < vMin) continue;
+    for (const c of COLORS) if (inBands(P.H[i], bandsSet[c])) { votes[c]++; tot++; break; }
+  }
+  if (tot < 3) return null;
+  let best = null; for (const c of COLORS) if (!best || votes[c] > votes[best]) best = c;
+  return votes[best] * 2 > tot ? best : (votes[best] > 0 ? best : null);
+}
+function voteColorInBox(P, b) {
+  const votes = { Red: 0, Green: 0, Blue: 0 }; let tot = 0;
+  for (let y = Math.max(0, b.y1 | 0); y < Math.min(P.h, b.y2); y++) for (let x = Math.max(0, b.x1 | 0); x < Math.min(P.w, b.x2); x++) {
+    const i = y * P.w + x; if (P.S[i] < 120 || P.V[i] < TIN_V_MIN) continue;
+    for (const c of COLORS) if (inBands(P.H[i], TIN_HUE[c])) { votes[c]++; tot++; break; }
+  }
+  if (!tot) return null; let best = 'Red'; for (const c of COLORS) if (votes[c] > votes[best]) best = c; return best;
+}
+// BFS region grow inside a window. seeds: array of pixel indices; visited may carry a previous region (value 1).
+function grow(P, seeds, pred, wx0, wy0, wx1, wy1, visited) {
+  const ww = wx1 - wx0 + 1, wh = wy1 - wy0 + 1;
+  const vis = visited || new Uint8Array(ww * wh);
+  const q = new Int32Array(ww * wh * 2); let qh = 0, qt = 0;
+  let minx = 1e9, miny = 1e9, maxx = -1, maxy = -1, area = 0, touch = false;
+  const push = (x, y) => { const li = (y - wy0) * ww + (x - wx0); if (vis[li]) return; vis[li] = 1; q[qt++] = x; q[qt++] = y; };
+  if (visited) { for (let y = wy0; y <= wy1; y++) for (let x = wx0; x <= wx1; x++) if (vis[(y - wy0) * ww + (x - wx0)]) { q[qt++] = x; q[qt++] = y; } }
+  for (const s of seeds) push(s % P.w, (s / P.w) | 0);
+  while (qh < qt) {
+    const x = q[qh++], y = q[qh++];
+    area++; if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y;
+    if ((x === wx0 && wx0 > 0) || (x === wx1 && wx1 < P.w - 1) || (y === wy0 && wy0 > 0) || (y === wy1 && wy1 < P.h - 1)) touch = true;
+    const nb = [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]];
+    for (const [nx, ny] of nb) {
+      if (nx < wx0 || nx > wx1 || ny < wy0 || ny > wy1 || nx < 0 || ny < 0 || nx >= P.w || ny >= P.h) continue;
+      const li = (ny - wy0) * ww + (nx - wx0); if (vis[li]) continue;
+      if (pred(ny * P.w + nx, nx, ny)) { vis[li] = 1; q[qt++] = nx; q[qt++] = ny; }
+    }
+  }
+  return { minx, miny, maxx, maxy, area, touch, vis, ww, wh, wx0, wy0, wx1, wy1 };
+}
+function seedsNear(P, cx, cy, r, pred) {
+  const out = [];
+  for (let rr = 0; rr <= r && !out.length; rr++) {
+    for (let y = cy - rr; y <= cy + rr; y++) for (let x = cx - rr; x <= cx + rr; x++) {
+      if (x < 0 || y < 0 || x >= P.w || y >= P.h) continue;
+      if (Math.max(Math.abs(x - cx), Math.abs(y - cy)) !== rr) continue;
+      const i = y * P.w + x; if (pred(i, x, y)) out.push(i);
+    }
+  }
+  return out;
+}
+function kasaFit(pts) {
+  // algebraic circle fit: x^2+y^2 + D x + E y + F = 0
+  let sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, sxz = 0, syz = 0, sz = 0; const n = pts.length; if (n < 6) return null;
+  for (const [x, y] of pts) { const z = x * x + y * y; sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y; sxz += x * z; syz += y * z; sz += z; }
+  const A = [[sxx, sxy, sx], [sxy, syy, sy], [sx, sy, n]], b = [-sxz, -syz, -sz];
+  const det = m => m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+  const d0 = det(A); if (Math.abs(d0) < 1e-6) return null;
+  const col = (i, v) => A.map((r, j) => r.map((c, k) => k === i ? v[j] : c));
+  const D = det(col(0, b)) / d0, E = det(col(1, b)) / d0, F = det(col(2, b)) / d0;
+  const cx = -D / 2, cy = -E / 2, r2 = cx * cx + cy * cy - F; if (r2 <= 0) return null;
+  return { cx, cy, r: Math.sqrt(r2) };
+}
+function segmentRag(P, cx, cy) {
+  const color = voteColor(P, cx, cy, 6, 150, 40, PAD_HUE) || voteColor(P, cx, cy, 14, 120, 30, TIN_HUE);
+  if (!color) return null;
+  const bands = PAD_HUE[color];
+  // 1) strict paint only (the shadowed board is blue-ish and saturated too, so shadows never seed a pad)
+  let pred1 = i => inBands(P.H[i], bands) && P.S[i] >= PAD_S_STRICT && P.V[i] >= PAD_V_STRICT;
+  let seeds = seedsNear(P, cx, cy, 20, pred1);
+  if (!seeds.length) {
+    // whole pad in the drone's shadow: grow on the seed's own hue (+-5) with a high S floor instead
+    const i0 = cy * P.w + cx; const h0 = P.H[i0];
+    pred1 = i => Math.min(Math.abs(P.H[i] - h0), 180 - Math.abs(P.H[i] - h0)) <= 5 && P.S[i] >= 220 && P.V[i] >= PAD_V;
+    seeds = seedsNear(P, cx, cy, 20, pred1); if (!seeds.length) return null;
+  }
+  const half = Math.max(30, (+$('maxrag').value || 700) / 2) | 0;
+  const wx0 = Math.max(0, cx - half), wy0 = Math.max(0, cy - half), wx1 = Math.min(P.w - 1, cx + half), wy1 = Math.min(P.h - 1, cy + half);
+  const r1 = grow(P, seeds, pred1, wx0, wy0, wx1, wy1);
+  if (r1.area < 20) return null;
+  // boundary points of the strict region, not on the frame border, for a circle fit
+  const pts = [];
+  for (let y = r1.miny; y <= r1.maxy; y++) for (let x = r1.minx; x <= r1.maxx; x++) {
+    const li = (y - wy0) * r1.ww + (x - wx0); if (!r1.vis[li]) continue;
+    if (x === 0 || y === 0 || x === P.w - 1 || y === P.h - 1) continue;
+    const l = x - 1 < wx0 ? 0 : r1.vis[li - 1], rr = x + 1 > wx1 ? 0 : r1.vis[li + 1], u = y - 1 < wy0 ? 0 : r1.vis[li - r1.ww], dd = y + 1 > wy1 ? 0 : r1.vis[li + r1.ww];
+    if (!(l && rr && u && dd)) pts.push([x, y]);
+  }
+  const bw = r1.maxx - r1.minx + 1, bh = r1.maxy - r1.miny + 1;
+  let fit = kasaFit(pts);
+  const rmin = Math.max(bw, bh) / 2 * 0.9, rmax = Math.max(bw, bh) / 2 * 1.6;
+  if (!fit || !(fit.r >= rmin && fit.r <= rmax)) fit = { cx: (r1.minx + r1.maxx) / 2, cy: (r1.miny + r1.maxy) / 2, r: Math.max(bw, bh) / 2 };
+  // 2) recover the pad's shadowed / desaturated parts, but only inside its own circle
+  const R2 = (fit.r * 1.06) ** 2;
+  const pred2 = (i, x, y) => ((x - fit.cx) ** 2 + (y - fit.cy) ** 2 <= R2) && inBands(P.H[i], bands) && P.S[i] >= PAD_S && P.V[i] >= PAD_V;
+  const r2 = grow(P, [], pred2, wx0, wy0, wx1, wy1, r1.vis);
+  return { k: 'Rag', c: color, x1: Math.max(0, r2.minx - 1), y1: Math.max(0, r2.miny - 1), x2: Math.min(P.w, r2.maxx + 2), y2: Math.min(P.h, r2.maxy + 2), flag: false };
+}
+function segmentTin(P, cx, cy) {
+  const color = voteColor(P, cx, cy, 2, 120, TIN_V_MIN, TIN_HUE) || voteColor(P, cx, cy, 4, 120, TIN_V_MIN, TIN_HUE) || voteColor(P, cx, cy, 7, 100, TIN_V_MIN, TIN_HUE);
+  const maxTin = Math.max(20, +$('maxtin').value || 120);
+  const half = maxTin;
+  const wx0 = Math.max(0, cx - half), wy0 = Math.max(0, cy - half), wx1 = Math.min(P.w - 1, cx + half), wy1 = Math.min(P.h - 1, cy + half);
+  const fallback = { k: 'Tin', c: color || 'Red', x1: Math.max(0, cx - 12), y1: Math.max(0, cy - 12), x2: Math.min(P.w, cx + 12), y2: Math.min(P.h, cy + 12), flag: true };
+  if (!color) return fallback;
+  const bands = TIN_HUE[color];
+  const vs = [];
+  for (let y = cy - 1; y <= cy + 1; y++) for (let x = cx - 1; x <= cx + 1; x++) if (x >= 0 && y >= 0 && x < P.w && y < P.h) vs.push(P.V[y * P.w + x]);
+  vs.sort((a, b) => a - b); const sV = vs[vs.length >> 1];
+  const attempts = [
+    { up: Math.max(30, 0.8 * sV), s: 120 }, { up: Math.max(20, 0.4 * sV), s: 150 }, { up: 15, s: 180 },
+  ];
+  // the can's own shadow (same hue, as dark as the can) is joined to it by a near-black umbra, so a V floor
+  // at half the clicked brightness cuts the shadow off while keeping the can's body
+  // Only needed when the can has the pad's own color: then the pad's strict paint dominates the window.
+  const padColor = voteColor(P, cx, cy, half, PAD_S_STRICT, PAD_V_STRICT, PAD_HUE);
+  const vmin = padColor === color ? Math.max(TIN_V_MIN, 0.5 * sV) : TIN_V_MIN;
+  for (const a of attempts) {
+    const vmax = sV + a.up;
+    const pred = i => inBands(P.H[i], bands) && P.S[i] >= a.s && P.V[i] >= vmin && P.V[i] <= vmax;
+    const seeds = seedsNear(P, cx, cy, 6, pred); if (!seeds.length) continue;
+    const r = grow(P, seeds, pred, wx0, wy0, wx1, wy1);
+    if (r.touch || r.maxx - r.minx + 1 > maxTin * 1.1 || r.maxy - r.miny + 1 > maxTin * 1.1) continue;
+    const box = { k: 'Tin', c: color, x1: Math.max(0, r.minx - 1), y1: Math.max(0, r.miny - 1), x2: Math.min(P.w, r.maxx + 2), y2: Math.min(P.h, r.maxy + 2), flag: false };
+    const c2 = voteColorInBox(P, box); if (c2) box.c = c2;
+    return box;
+  }
+  return fallback;
+}
+async function segmentAt(i, x, y, kind) {
+  const P = await hsvOf(i); x = clamp(Math.round(x), 0, P.w - 1); y = clamp(Math.round(y), 0, P.h - 1);
+  return kind === 'Rag' ? segmentRag(P, x, y) : segmentTin(P, x, y);
+}
+
+// ---------- rendering ----------
+let view = { sx: 1, ox: 0, oy: 0, w: 0, h: 0 };
+function fitCanvas() {
+  const r = cv.getBoundingClientRect(); const dpr = window.devicePixelRatio || 1;
+  if (cv.width !== Math.round(r.width * dpr) || cv.height !== Math.round(r.height * dpr)) { cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr); }
+  const f = S.frames[S.idx]; const w = f ? f.w || S.src.w : 16, h = f ? f.h || S.src.h : 9;
+  const s = Math.min(r.width / w, r.height / h);
+  view = { sx: s, ox: (r.width - w * s) / 2, oy: (r.height - h * s) / 2, w, h, dpr };
+}
+const toImg = (px, py) => ({ x: (px - view.ox) / view.sx, y: (py - view.oy) / view.sx });
+const toScr = (x, y) => ({ x: view.ox + x * view.sx, y: view.oy + y * view.sx });
+function curLabels() { const f = S.frames[S.idx]; if (!f) return []; return S.labels[f.name] || (S.labels[f.name] = []); }
+async function showFrame(i) {
+  if (!S.frames.length) return;
+  S.idx = clamp(i, 0, S.frames.length - 1); S.sel = -1;
+  $('fidx').value = S.idx + 1; $('fslider').value = S.idx;
+  const f = S.frames[S.idx];
+  $('stageinfo').hidden = false; $('stageinfo').textContent = `#${S.idx + 1}  ${f.name}` + (S.src.kind === 'video' ? `  t=${f.t.toFixed(2)}s` : '') + (S.uploaded[f.name] ? '  · Roboflow 업로드됨' : '');
+  await bitmapOf(S.idx);
+  draw(); renderList(); save();
+  hsvOf(S.idx); // warm the cache
+  if (S.idx + 1 < S.frames.length) bitmapOf(S.idx + 1);
+}
+function draw() {
+  fitCanvas(); const bm = S.bitmaps.get(S.idx); if (!bm) return;
+  ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.drawImage(bm, view.ox, view.oy, view.w * view.sx, view.h * view.sx);
+  drawOverlay(ctx, view, S.idx, curLabels(), S.sel, S.review);
+}
+// boxes (+ selection handles, review pins and the burned-in frame number) in the coordinate frame given by v
+function drawOverlay(g, v, idx, L, sel, review) {
+  const sc = (x, y) => ({ x: v.ox + x * v.sx, y: v.oy + y * v.sx });
+  const fam = getComputedStyle(document.body).fontFamily;
+  L.forEach((b, j) => {
+    const a = sc(b.x1, b.y1), c = sc(b.x2, b.y2); const w = c.x - a.x, h = c.y - a.y;
+    g.lineWidth = j === sel ? 3 : 2; g.strokeStyle = SWATCH[b.c]; g.setLineDash(b.flag ? [5, 4] : []);
+    g.strokeRect(a.x, a.y, w, h); g.setLineDash([]);
+    if (j === sel) { g.strokeStyle = '#fff'; g.lineWidth = 1; g.strokeRect(a.x - 2, a.y - 2, w + 4, h + 4); g.fillStyle = '#fff'; for (const [hx, hy] of [[a.x, a.y], [c.x, a.y], [a.x, c.y], [c.x, c.y]]) g.fillRect(hx - 4, hy - 4, 8, 8); }
+    const txt = b.c + '_' + b.k + (b.flag ? ' ?' : ''); g.font = '600 11px ' + fam;
+    const tw = g.measureText(txt).width + 8; const ty = a.y - 15 < v.oy ? a.y + 1 : a.y - 15;
+    g.fillStyle = SWATCH[b.c]; g.fillRect(a.x, ty, tw, 14); g.fillStyle = '#fff'; g.fillText(txt, a.x + 4, ty + 11);
+  });
+  S.notes.forEach((n, k) => {
+    if (n.i !== idx) return; const p = sc(n.x, n.y);
+    g.beginPath(); g.arc(p.x, p.y, 10, 0, Math.PI * 2); g.fillStyle = '#facc15'; g.fill(); g.lineWidth = 2; g.strokeStyle = '#000'; g.stroke();
+    g.fillStyle = '#000'; g.font = '700 11px ' + fam; g.textAlign = 'center'; g.fillText(String(k + 1), p.x, p.y + 4); g.textAlign = 'left';
+  });
+  if (review) {
+    const f = S.frames[idx]; const txt = `#${idx + 1}/${S.frames.length}  ${f.name}` + (S.src.kind === 'video' ? `  t=${f.t.toFixed(2)}s` : '');
+    g.font = '700 16px ' + MONO; const tw = g.measureText(txt).width + 14; const y0 = v.oy + v.h * v.sx - 28;
+    g.fillStyle = 'rgba(0,0,0,.65)'; g.fillRect(v.ox, y0, tw, 28); g.fillStyle = '#fff'; g.fillText(txt, v.ox + 7, y0 + 20);
+  }
+}
+const MONO = 'ui-monospace, Consolas, monospace';
+function renderList() {
+  const L = curLabels(); const el = $('boxes'); el.innerHTML = '';
+  L.forEach((b, j) => {
+    const d = document.createElement('div'); d.className = 'bx' + (j === S.sel ? ' sel' : '');
+    const opts = CLASSES.map(c => `<option${c === b.c + '_' + b.k ? ' selected' : ''}>${c}</option>`).join('');
+    d.innerHTML = `<i style="background:${SWATCH[b.c]}"></i><select>${opts}</select><span class="sz">${Math.round(b.x2 - b.x1)}×${Math.round(b.y2 - b.y1)}${b.flag ? ' <span class="flag">확인</span>' : ''}</span><button class="small">✕</button>`;
+    d.onclick = () => { S.sel = j; draw(); renderList(); };
+    d.querySelector('select').onchange = e => { pushHist(); const [c, k] = e.target.value.split('_'); b.c = c; b.k = k; b.flag = false; changed(); };
+    d.querySelector('button').onclick = e => { e.stopPropagation(); pushHist(); L.splice(j, 1); S.sel = -1; changed(); };
+    el.appendChild(d);
+  });
+  let nl = 0, nb = 0; for (const n in S.labels) { if (S.labels[n].length) { nl++; nb += S.labels[n].length; } }
+  $('nlabeled').textContent = nl; $('nboxes').textContent = nb;
+}
+function changed() { draw(); renderList(); save(); }
+function pushHist() { const f = S.frames[S.idx]; if (!f) return; const h = S.hist[f.name] || (S.hist[f.name] = []); h.push(JSON.stringify(curLabels())); if (h.length > 40) h.shift(); }
+function undo() { const f = S.frames[S.idx]; const h = f && S.hist[f.name]; if (!h || !h.length) return; S.labels[f.name] = JSON.parse(h.pop()); S.sel = -1; changed(); }
+
+// ---------- mouse ----------
+let drag = null; // {type:'move'|'resize'|'draw', j, hx, hy, start, orig}
+function hitTest(x, y) {
+  const L = curLabels(); const tol = 7 / view.sx;
+  for (let j = L.length - 1; j >= 0; j--) {
+    const b = L[j];
+    const corners = { nw: [b.x1, b.y1], ne: [b.x2, b.y1], sw: [b.x1, b.y2], se: [b.x2, b.y2] };
+    for (const k in corners) if (Math.abs(x - corners[k][0]) <= tol && Math.abs(y - corners[k][1]) <= tol) return { j, h: k };
+  }
+  // prefer the smallest box containing the point (tin over rag)
+  let best = null;
+  L.forEach((b, j) => { if (x >= b.x1 && x <= b.x2 && y >= b.y1 && y <= b.y2) { const a = (b.x2 - b.x1) * (b.y2 - b.y1); if (!best || a < best.a) best = { j, a }; } });
+  if (best) {
+    const b = L[best.j];
+    const nearEdge = Math.min(Math.abs(x - b.x1), Math.abs(x - b.x2), Math.abs(y - b.y1), Math.abs(y - b.y2)) <= tol;
+    if (nearEdge) { const h = (Math.abs(x - b.x1) <= tol ? 'w' : Math.abs(x - b.x2) <= tol ? 'e' : '') + (Math.abs(y - b.y1) <= tol ? 'n' : Math.abs(y - b.y2) <= tol ? 's' : ''); return { j: best.j, h: h || 'move' }; }
+    return { j: best.j, h: 'move' };
+  }
+  return null;
+}
+cv.addEventListener('contextmenu', e => e.preventDefault());
+cv.addEventListener('pointerdown', e => {
+  if (!S.frames.length) return; cv.setPointerCapture(e.pointerId);
+  const r = cv.getBoundingClientRect(); const p = toImg(e.clientX - r.left, e.clientY - r.top);
+  if (S.review) {
+    if (e.button !== 0) return;
+    if (S.playing) { stopPlay(); return; }
+    if (p.x < 0 || p.y < 0 || p.x >= view.w || p.y >= view.h) return;
+    S.pendingPin = { i: S.idx, x: Math.round(p.x), y: Math.round(p.y) };
+    S.notes.push({ ...S.pendingPin, text: '' }); draw(); renderNotes();
+    $('noteedit').hidden = false; $('notetext').value = ''; $('notetext').focus();
+    return;
+  }
+  if (e.button === 2) { const h = hitTest(p.x, p.y); if (h) { pushHist(); curLabels().splice(h.j, 1); S.sel = -1; changed(); } return; }
+  if (e.button !== 0) return;
+  if (e.shiftKey) { drag = { type: 'draw', start: p, moved: false }; return; }
+  const h = hitTest(p.x, p.y);
+  if (h) { S.sel = h.j; drag = { type: h.h === 'move' ? 'move' : 'resize', j: h.j, h: h.h, start: p, orig: { ...curLabels()[h.j] }, moved: false }; draw(); renderList(); return; }
+  drag = { type: 'click', start: p, moved: false };
+});
+cv.addEventListener('pointermove', e => {
+  const r = cv.getBoundingClientRect(); const p = toImg(e.clientX - r.left, e.clientY - r.top);
+  drawMag(p.x, p.y);
+  if (!drag) { const h = hitTest(p.x, p.y); cv.className = h ? (h.h === 'move' ? 'grab' : 'resize') : ''; return; }
+  const dx = p.x - drag.start.x, dy = p.y - drag.start.y;
+  if (Math.abs(dx) * view.sx > 3 || Math.abs(dy) * view.sx > 3) { if (!drag.moved && drag.type !== 'click' && drag.type !== 'draw') pushHist(); drag.moved = true; }
+  if (!drag.moved) return;
+  const W = view.w, H = view.h;
+  if (drag.type === 'move') { const b = curLabels()[drag.j], o = drag.orig; const bw = o.x2 - o.x1, bh = o.y2 - o.y1; b.x1 = clamp(o.x1 + dx, 0, W - bw); b.y1 = clamp(o.y1 + dy, 0, H - bh); b.x2 = b.x1 + bw; b.y2 = b.y1 + bh; b.flag = false; draw(); }
+  else if (drag.type === 'resize') { const b = curLabels()[drag.j], o = drag.orig; if (drag.h.includes('w')) b.x1 = clamp(o.x1 + dx, 0, o.x2 - 2); if (drag.h.includes('e')) b.x2 = clamp(o.x2 + dx, o.x1 + 2, W); if (drag.h.includes('n')) b.y1 = clamp(o.y1 + dy, 0, o.y2 - 2); if (drag.h.includes('s')) b.y2 = clamp(o.y2 + dy, o.y1 + 2, H); b.flag = false; draw(); }
+  else if (drag.type === 'draw') { draw(); const a = toScr(Math.min(drag.start.x, p.x), Math.min(drag.start.y, p.y)), c = toScr(Math.max(drag.start.x, p.x), Math.max(drag.start.y, p.y)); ctx.setLineDash([4, 3]); ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.strokeRect(a.x, a.y, c.x - a.x, c.y - a.y); ctx.setLineDash([]); }
+});
+cv.addEventListener('pointerup', async e => {
+  if (!drag) return; const d = drag; drag = null;
+  const r = cv.getBoundingClientRect(); const p = toImg(e.clientX - r.left, e.clientY - r.top);
+  if (d.type === 'click' && !d.moved) { await clickAt(p.x, p.y); return; }
+  if (d.type === 'draw') {
+    if (!d.moved) return;
+    const W = view.w, H = view.h;
+    const b = { k: S.mode, c: 'Red', x1: clamp(Math.min(d.start.x, p.x), 0, W), y1: clamp(Math.min(d.start.y, p.y), 0, H), x2: clamp(Math.max(d.start.x, p.x), 0, W), y2: clamp(Math.max(d.start.y, p.y), 0, H), flag: false };
+    if (b.x2 - b.x1 < 3 || b.y2 - b.y1 < 3) return;
+    const P = await hsvOf(S.idx); b.c = voteColorInBox(P, b) || 'Red';
+    pushHist(); curLabels().push(b); S.sel = curLabels().length - 1; changed(); return;
+  }
+  if (d.moved) { const b = curLabels()[d.j]; for (const k of ['x1', 'y1', 'x2', 'y2']) b[k] = Math.round(b[k]); changed(); }
+  else renderList();
+});
+async function clickAt(x, y) {
+  if (x < 0 || y < 0 || x >= view.w || y >= view.h) return;
+  const box = await segmentAt(S.idx, x, y, S.mode);
+  if (!box) { $('stageinfo').textContent += '  · 이 지점에서 패드 색을 찾지 못했습니다 (패드 페인트 위를 클릭하세요)'; return; }
+  pushHist(); const L = curLabels(); L.push(box); S.sel = L.length - 1; changed();
+}
+function drawMag(x, y) {
+  const bm = S.bitmaps.get(S.idx); if (!bm) return;
+  const z = 4, n = mag.width / z;
+  mctx.imageSmoothingEnabled = false; mctx.fillStyle = '#000'; mctx.fillRect(0, 0, mag.width, mag.height);
+  mctx.drawImage(bm, x - n / 2, y - n / 2, n, n, 0, 0, mag.width, mag.height);
+  mctx.strokeStyle = 'rgba(255,255,255,.8)'; mctx.lineWidth = 1; mctx.beginPath(); mctx.moveTo(mag.width / 2, 0); mctx.lineTo(mag.width / 2, mag.height); mctx.moveTo(0, mag.height / 2); mctx.lineTo(mag.width, mag.height / 2); mctx.stroke();
+  for (const b of curLabels()) { mctx.strokeStyle = SWATCH[b.c]; mctx.strokeRect((b.x1 - (x - n / 2)) * z, (b.y1 - (y - n / 2)) * z, (b.x2 - b.x1) * z, (b.y2 - b.y1) * z); }
+}
+
+// ---------- panel controls / keys ----------
+function setMode(m) { S.mode = m; $('mtin').classList.toggle('on', m === 'Tin'); $('mrag').classList.toggle('on', m === 'Rag'); }
+$('mtin').onclick = () => setMode('Tin'); $('mrag').onclick = () => setMode('Rag');
+$('bprev').onclick = () => showFrame(S.idx - 1); $('bnext').onclick = () => showFrame(S.idx + 1);
+$('bnextun').onclick = () => { for (let i = S.idx + 1; i < S.frames.length; i++) if (!(S.labels[S.frames[i].name] || []).length) { showFrame(i); return; } };
+$('fidx').onchange = () => showFrame((+$('fidx').value || 1) - 1);
+$('fslider').oninput = () => showFrame(+$('fslider').value);
+$('bclear').onclick = () => { pushHist(); curLabels().length = 0; S.sel = -1; changed(); };
+$('bcopy').onclick = copyPrev;
+async function copyPrev() {
+  if (S.idx === 0) return; const prev = S.labels[S.frames[S.idx - 1].name] || []; if (!prev.length) return;
+  pushHist(); const L = curLabels();
+  for (const b of prev) {
+    const cx = (b.x1 + b.x2) / 2, cy = (b.y1 + b.y2) / 2;
+    let nb = await segmentAt(S.idx, cx, cy, b.k);
+    if (nb && !nb.flag && nb.c === b.c && iou(nb, b) > 0.15) L.push(nb); else L.push({ ...b, flag: true });
+  }
+  changed();
+}
+function iou(a, b) { const ix = Math.max(0, Math.min(a.x2, b.x2) - Math.max(a.x1, b.x1)), iy = Math.max(0, Math.min(a.y2, b.y2) - Math.max(a.y1, b.y1)); const i = ix * iy; const u = (a.x2 - a.x1) * (a.y2 - a.y1) + (b.x2 - b.x1) * (b.y2 - b.y1) - i; return u > 0 ? i / u : 0; }
+document.addEventListener('keydown', e => {
+  if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) return;
+  if (!S.frames.length) return;
+  const k = e.key.toLowerCase(); const L = curLabels();
+  if (k === 't') setMode('Tin'); else if (k === 'r') setMode('Rag');
+  else if (k === ' ' && S.review) { e.preventDefault(); if (S.playing) stopPlay(); else startPlay(); }
+  else if (k === 'arrowright' || k === 'd' || k === ' ') { e.preventDefault(); showFrame(S.idx + 1); }
+  else if (k === 'arrowleft' || k === 'a') { e.preventDefault(); showFrame(S.idx - 1); }
+  else if ((k === 'delete' || k === 'backspace') && S.sel >= 0) { pushHist(); L.splice(S.sel, 1); S.sel = -1; changed(); }
+  else if (k === 'z' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); undo(); }
+  else if (k === 'c') copyPrev();
+  else if ('123'.includes(k) && S.sel >= 0) { pushHist(); L[S.sel].c = COLORS[+k - 1]; L[S.sel].flag = false; changed(); }
+  else if (k === 'q' && S.sel >= 0) { pushHist(); L[S.sel].k = L[S.sel].k === 'Tin' ? 'Rag' : 'Tin'; changed(); }
+  else if (k === 'escape') { S.sel = -1; changed(); }
+});
+new ResizeObserver(() => draw()).observe($('stage'));
+
+// ---------- YOLO export ----------
+function yoloTxt(f) {
+  const W = f.w || S.src.w, H = f.h || S.src.h;
+  return (S.labels[f.name] || []).map(b => {
+    const cx = clamp((b.x1 + b.x2) / 2 / W, 0, 1), cy = clamp((b.y1 + b.y2) / 2 / H, 0, 1), w = clamp((b.x2 - b.x1) / W, 0, 1), h = clamp((b.y2 - b.y1) / H, 0, 1);
+    return `${clsId(b.c, b.k)} ${cx.toFixed(6)} ${cy.toFixed(6)} ${w.toFixed(6)} ${h.toFixed(6)}`;
+  }).join('\n') + ((S.labels[f.name] || []).length ? '\n' : '');
+}
+const dataYaml = base => `path: /PATH/TO/${base}_labels   # 압축을 푼 폴더의 절대 경로로 바꾸세요\ntrain: images\nval: images\nnc: 6\nnames: ['Blue_Rag', 'Blue_Tin', 'Green_Rag', 'Green_Tin', 'Red_Rag', 'Red_Tin']\n`;
+// minimal store-only ZIP writer (JPEGs do not compress anyway) so the file works offline
+const CRC = (() => { const t = new Int32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c; } return t; })();
+function crc32(u8) { let c = -1; for (let i = 0; i < u8.length; i++) c = CRC[(c ^ u8[i]) & 255] ^ (c >>> 8); return (c ^ -1) >>> 0; }
+function makeZip(entries) {
+  const enc = new TextEncoder(); const parts = []; const cd = []; let off = 0;
+  const d = new Date(); const dtime = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1), ddate = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+  for (const e of entries) {
+    const name = enc.encode(e.name), data = e.data, crc = crc32(data);
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true); lh.setUint16(8, 0, true); lh.setUint16(10, dtime, true); lh.setUint16(12, ddate, true);
+    lh.setUint32(14, crc, true); lh.setUint32(18, data.length, true); lh.setUint32(22, data.length, true); lh.setUint16(26, name.length, true); lh.setUint16(28, 0, true);
+    parts.push(lh.buffer, name, data);
+    const ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x0800, true); ch.setUint16(10, 0, true); ch.setUint16(12, dtime, true); ch.setUint16(14, ddate, true);
+    ch.setUint32(16, crc, true); ch.setUint32(20, data.length, true); ch.setUint32(24, data.length, true); ch.setUint16(28, name.length, true); ch.setUint16(30, 0, true); ch.setUint16(32, 0, true); ch.setUint16(34, 0, true); ch.setUint16(36, 0, true); ch.setUint32(38, 0, true); ch.setUint32(42, off, true);
+    cd.push(ch.buffer, name);
+    off += 30 + name.length + data.length;
+  }
+  let cdSize = 0; for (const c of cd) cdSize += c.byteLength;
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true); end.setUint16(4, 0, true); end.setUint16(6, 0, true); end.setUint16(8, entries.length, true); end.setUint16(10, entries.length, true); end.setUint32(12, cdSize, true); end.setUint32(16, off, true); end.setUint16(20, 0, true);
+  return new Blob([...parts, ...cd, end.buffer], { type: 'application/zip' });
+}
+$('bzip').onclick = async () => {
+  const enc = new TextEncoder(); const base = S.src.base;
+  const incl = $('inclempty').checked; const entries = []; let n = 0, nb = 0;
+  for (const f of S.frames) {
+    const L = S.labels[f.name] || []; if (!L.length && !incl) continue;
+    const stem = f.name.replace(/\.[^.]+$/, '');
+    entries.push({ name: `images/${f.name}`, data: new Uint8Array(await f.blob.arrayBuffer()) });
+    entries.push({ name: `labels/${stem}.txt`, data: enc.encode(yoloTxt(f)) });
+    n++; nb += L.length;
+  }
+  if (!n) { $('zipmsg').textContent = '라벨된 프레임이 없습니다.'; return; }
+  entries.push({ name: 'data.yaml', data: enc.encode(dataYaml(base)) });
+  entries.push({ name: 'classes.txt', data: enc.encode(CLASSES.join('\n') + '\n') });
+  const blob = makeZip(entries); const r = await saveFile(blob, `${base}_labels.zip`);
+  $('zipmsg').textContent = `${base}_labels.zip 저장: ${n} 프레임 / ${nb} 박스 (${(blob.size / 1048576).toFixed(1)} MB)` + saveNote2(r);
+  setStep(4);
+};
+
+// ---------- Roboflow ----------
+try { $('rfkey').value = sessionStorage.getItem('t3click:rfkey') || ''; const p = localStorage.getItem('t3click:rfproj'); if (p) $('rfproj').value = p; } catch (e) {}
+$('rfkey').addEventListener('input', () => { try { sessionStorage.setItem('t3click:rfkey', $('rfkey').value); } catch (e) {} });
+$('rfproj').addEventListener('input', () => { try { localStorage.setItem('t3click:rfproj', $('rfproj').value); } catch (e) {} });
+$('brfstop').onclick = () => { S.rfAbort = true; };
+$('brf').onclick = async () => {
+  const key = $('rfkey').value.trim(), proj = $('rfproj').value.trim(), batch = $('rfbatch').value.trim() || 'task3_click', split = $('rfsplit').value;
+  const msg = $('rfmsg');
+  if (!key || !proj) { msg.className = 'msg err'; msg.textContent = 'API Key와 프로젝트 ID를 입력하세요 (Roboflow → Settings → API Keys → Private API Key).'; return; }
+  const todo = S.frames.filter(f => (S.labels[f.name] || []).length && !S.uploaded[f.name]);
+  const already = Object.keys(S.uploaded).length;
+  if (!todo.length) { msg.className = 'msg'; msg.textContent = already ? `이미 전부 업로드됨 (${already}장).` : '라벨된 프레임이 없습니다.'; return; }
+  S.rfAbort = false; $('brf').disabled = true; $('brfstop').hidden = false; msg.className = 'msg'; msg.textContent = '';
+  const labelmap = {}; CLASSES.forEach((c, i) => { labelmap[i] = c; });
+  let ok = 0, fail = 0; const errs = [];
+  const api = 'https://api.roboflow.com/dataset/' + encodeURIComponent(proj);
+  for (let i = 0; i < todo.length; i++) {
+    if (S.rfAbort) break;
+    const f = todo[i]; const stem = f.name.replace(/\.[^.]+$/, '');
+    try {
+      const fd = new FormData(); fd.append('name', f.name); fd.append('split', split); fd.append('file', f.blob, f.name);
+      const r1 = await fetch(`${api}/upload?api_key=${encodeURIComponent(key)}&batch=${encodeURIComponent(batch)}`, { method: 'POST', body: fd });
+      const j1 = await r1.json().catch(() => ({}));
+      if (!r1.ok || !j1.id) throw new Error(`upload ${r1.status}: ${j1.error ? (j1.error.message || JSON.stringify(j1.error)) : JSON.stringify(j1)}`);
+      const r2 = await fetch(`${api}/annotate/${j1.id}?api_key=${encodeURIComponent(key)}&name=${encodeURIComponent(stem + '.txt')}&overwrite=true`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ annotationFile: yoloTxt(f), labelmap }) });
+      const j2 = await r2.json().catch(() => ({}));
+      if (!r2.ok || j2.error) throw new Error(`annotate ${r2.status}: ${j2.error ? (j2.error.message || JSON.stringify(j2.error)) : JSON.stringify(j2)}`);
+      S.uploaded[f.name] = j1.id; ok++;
+    } catch (err) { fail++; errs.push(`${f.name}: ${err.message}`); if (/40[13]|api_key|unauthor/i.test(err.message) && fail >= 2) { S.rfAbort = true; } }
+    $('rfprog').style.width = (100 * (i + 1) / todo.length) + '%';
+    msg.textContent = `${i + 1} / ${todo.length} · 성공 ${ok} · 실패 ${fail}` + (errs.length ? '\n' + errs.slice(-3).join('\n') : '');
+    save();
+  }
+  $('brf').disabled = false; $('brfstop').hidden = true;
+  msg.className = fail ? 'msg err' : 'msg ok';
+  msg.textContent = (S.rfAbort && ok + fail < todo.length ? '중지됨. ' : '') + `업로드 완료: 성공 ${ok} / 실패 ${fail} (배치 "${batch}", split ${split}).` + (ok ? ' Roboflow의 Annotate 탭에서 배치를 확인하세요.' : '') + (errs.length ? '\n' + errs.slice(0, 5).join('\n') : '') + (inFrame && fail ? '\n이 창에서는 외부 요청이 막혀 있습니다. HTML 파일을 직접 열어서 업로드하세요.' : '');
+  if (ok) setStep(4);
+};
+
+// ---------- review: playback, pins, notes export, label import, webm ----------
+function setReview(on) {
+  S.review = on; S.sel = -1; if (!on) stopPlay();
+  $('breview').classList.toggle('on', on); $('breview').textContent = on ? '점검 모드 끄기 (라벨링으로)' : '점검 모드 켜기';
+  $('hint').innerHTML = on ? '<b>점검 모드</b> · <b>Space</b> 재생/정지 · <b>클릭</b> 재생 중이면 정지, 정지 중이면 그 지점에 메모 핀 · <b>←</b>/<b>→</b> 한 프레임씩'
+    : '<b>클릭</b> 현재 모드로 자동 박스 · <b>Shift+드래그</b> 수동 박스 · <b>드래그</b> 박스 이동/모서리 조절 · <b>우클릭</b> 삭제 · <b>T</b>/<b>R</b> 모드 · <b>←</b>/<b>→</b> 프레임 · <b>1 2 3</b> 선택 박스 색 Red/Green/Blue · <b>Q</b> Tin↔Rag · <b>C</b> 이전 프레임 박스 가져오기(재탐지) · <b>Ctrl+Z</b> 되돌리기';
+  cv.className = ''; draw();
+}
+$('breview').onclick = () => setReview(!S.review);
+function playList() { const only = $('ponlylab').checked; const out = []; S.frames.forEach((f, i) => { if (!only || (S.labels[f.name] || []).length) out.push(i); }); return out; }
+function startPlay() {
+  const list = playList(); if (!list.length) return;
+  if (!S.review) setReview(true);
+  S.playing = true; $('bplay').textContent = '⏸ 정지';
+  let pos = list.findIndex(i => i >= S.idx); if (pos < 0 || (pos === list.length - 1 && list[pos] === S.idx)) pos = 0;
+  const step = async () => {
+    if (!S.playing) return;
+    await showFrame(list[pos]); pos++;
+    if (pos >= list.length) { stopPlay(); return; }
+    S.timer = setTimeout(step, 1000 / Math.max(0.2, +$('pfps').value || 2));
+  };
+  step();
+}
+function stopPlay() { S.playing = false; clearTimeout(S.timer); $('bplay').textContent = '▶ 재생'; }
+$('bplay').onclick = () => { if (S.playing) stopPlay(); else startPlay(); };
+function saveNote() {
+  if (!S.pendingPin) return; const n = S.notes[S.notes.length - 1]; n.text = $('notetext').value.trim() || '(메모 없음)';
+  S.pendingPin = null; $('noteedit').hidden = true; renderNotes(); draw(); save();
+}
+$('bnotesave').onclick = saveNote;
+$('notetext').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); saveNote(); } if (e.key === 'Escape') { S.notes.pop(); S.pendingPin = null; $('noteedit').hidden = true; renderNotes(); draw(); } });
+function renderNotes() {
+  const el = $('notes'); el.innerHTML = '';
+  S.notes.forEach((n, k) => {
+    const d = document.createElement('div'); d.className = 'nt';
+    d.innerHTML = `<b>${k + 1}</b><span title="${esc(n.text)}">#${n.i + 1} (${n.x},${n.y}) ${esc(n.text || '입력 중...')}</span><button class="small">✕</button>`;
+    d.onclick = () => { stopPlay(); showFrame(n.i); };
+    d.querySelector('button').onclick = e => { e.stopPropagation(); S.notes.splice(k, 1); renderNotes(); draw(); save(); };
+    el.appendChild(d);
+  });
+}
+function pxBoxes(f) { return (S.labels[f.name] || []).map(b => ({ cls: clsId(b.c, b.k), class_name: b.c + '_' + b.k, x1: Math.round(b.x1), y1: Math.round(b.y1), x2: Math.round(b.x2), y2: Math.round(b.y2), flag: !!b.flag })); }
+async function frameJpeg(i, withBoxes, q) {
+  const bm = await bitmapOf(i); const oc = document.createElement('canvas'); oc.width = bm.width; oc.height = bm.height; const g = oc.getContext('2d'); g.drawImage(bm, 0, 0);
+  if (withBoxes) drawOverlay(g, { sx: 1, ox: 0, oy: 0, w: bm.width, h: bm.height }, i, S.labels[S.frames[i].name] || [], -1, true);
+  return new Uint8Array(await (await new Promise(r => oc.toBlob(r, 'image/jpeg', q))).arrayBuffer());
+}
+async function cropJpeg(n, k) {
+  const bm = await bitmapOf(n.i); const R = 120, z = 3; const oc = document.createElement('canvas'); oc.width = 2 * R * z; oc.height = 2 * R * z; const g = oc.getContext('2d');
+  g.imageSmoothingEnabled = false; g.fillStyle = '#000'; g.fillRect(0, 0, oc.width, oc.height);
+  g.drawImage(bm, n.x - R, n.y - R, 2 * R, 2 * R, 0, 0, oc.width, oc.height);
+  const v = { sx: z, ox: -(n.x - R) * z, oy: -(n.y - R) * z, w: bm.width, h: bm.height };
+  drawOverlay(g, v, n.i, S.labels[S.frames[n.i].name] || [], -1, false);
+  g.fillStyle = 'rgba(0,0,0,.6)'; g.fillRect(0, 0, oc.width, 22); g.fillStyle = '#fff'; g.font = '700 14px ' + MONO; g.fillText(`note ${k + 1}  frame #${n.i + 1}  (${n.x},${n.y})  x${z}`, 6, 16);
+  return new Uint8Array(await (await new Promise(r => oc.toBlob(r, 'image/jpeg', 0.9))).arrayBuffer());
+}
+$('bnotezip').onclick = async () => {
+  if (!S.notes.length) { $('notemsg').textContent = '메모가 없습니다. 점검 모드에서 이상한 곳을 클릭해 메모를 남기세요.'; return; }
+  const enc = new TextEncoder(); const entries = []; const done = new Set();
+  const notes = [];
+  for (let k = 0; k < S.notes.length; k++) {
+    const n = S.notes[k]; const f = S.frames[n.i]; const stem = f.name.replace(/\.[^.]+$/, '');
+    notes.push({ n: k + 1, frame_index: n.i + 1, frame_name: f.name, t_sec: S.src.kind === 'video' ? +f.t.toFixed(3) : null, x: n.x, y: n.y, text: n.text, boxes: pxBoxes(f), crop: `crops/note_${String(k + 1).padStart(2, '0')}.jpg` });
+    entries.push({ name: `crops/note_${String(k + 1).padStart(2, '0')}.jpg`, data: await cropJpeg(n, k) });
+    if (!done.has(f.name)) {
+      done.add(f.name);
+      entries.push({ name: `frames/${f.name}`, data: new Uint8Array(await f.blob.arrayBuffer()) });
+      entries.push({ name: `frames_with_boxes/${stem}_boxes.jpg`, data: await frameJpeg(n.i, true, 0.85) });
+      entries.push({ name: `labels/${stem}.txt`, data: enc.encode(yoloTxt(f)) });
+    }
+  }
+  const meta = { tool: 'Task3 클릭 라벨러', created: new Date().toISOString(), source: S.src.name, frame_size: [S.src.w, S.src.h], cut: S.src.kind === 'video' ? cutCfg() : null, classes: CLASSES, notes };
+  entries.push({ name: 'review_notes.json', data: enc.encode(JSON.stringify(meta, null, 2)) });
+  entries.push({ name: 'README.txt', data: enc.encode(`Task3 클릭 라벨러 점검 메모\n\n이 zip을 Claude 스레드에 올리고 "review_notes.json의 메모를 분석해서 labels/*.txt를 고쳐줘"라고 쓰세요.\n- review_notes.json: 메모(프레임 번호, 클릭 좌표 px, 내용)와 그 프레임의 현재 박스(px, 클래스)\n- crops/: 메모 지점 주변 240px를 3배 확대한 이미지(박스 포함)\n- frames/: 원본 프레임, frames_with_boxes/: 박스를 그린 프레임\n- labels/: 현재 YOLO 라벨 (class cx cy w h, 정규화)\n돌아온 labels/*.txt는 도구의 "수정된 라벨 txt 가져오기"로 불러오면 같은 이름의 프레임에 덮어씁니다.\n클래스 순서: ${CLASSES.join(', ')}\n`) });
+  const blob = makeZip(entries); const r = await saveFile(blob, `${S.src.base}_review_notes.zip`);
+  $('notemsg').textContent = `${S.src.base}_review_notes.zip 저장: 메모 ${S.notes.length}개, 프레임 ${done.size}장 (${(blob.size / 1048576).toFixed(1)} MB)` + saveNote2(r);
+};
+$('fimport').addEventListener('change', async e => {
+  const files = [...e.target.files]; let n = 0, nb = 0, miss = [];
+  const byStem = new Map(S.frames.map(f => [f.name.replace(/\.[^.]+$/, ''), f]));
+  for (const file of files) {
+    const stem = file.name.replace(/\.txt$/i, ''); const f = byStem.get(stem); if (!f) { miss.push(file.name); continue; }
+    const W = f.w || S.src.w, H = f.h || S.src.h; const txt = await file.text();
+    const boxes = txt.split('\n').map(l => l.trim()).filter(Boolean).map(l => { const [c, x, y, w, h] = l.split(/\s+/).map(Number); const name = CLASSES[c]; if (!name) return null; const [col, k] = name.split('_'); return { k, c: col, x1: (x - w / 2) * W, y1: (y - h / 2) * H, x2: (x + w / 2) * W, y2: (y + h / 2) * H, flag: false }; }).filter(Boolean);
+    const h = S.hist[f.name] || (S.hist[f.name] = []); h.push(JSON.stringify(S.labels[f.name] || []));
+    S.labels[f.name] = boxes; n++; nb += boxes.length;
+  }
+  $('notemsg').textContent = `라벨 가져오기: ${n}개 프레임 / ${nb} 박스 덮어씀` + (miss.length ? `\n프레임 이름과 맞지 않아 건너뜀: ${miss.slice(0, 5).join(', ')}${miss.length > 5 ? ' …' : ''}` : '');
+  e.target.value = ''; changed();
+});
+$('bwebm').onclick = async () => {
+  const list = playList(); if (!list.length) { $('notemsg').textContent = '라벨된 프레임이 없습니다.'; return; }
+  if (typeof MediaRecorder === 'undefined') { $('notemsg').textContent = '이 브라우저는 MediaRecorder를 지원하지 않습니다.'; return; }
+  const fps = Math.max(0.2, +$('pfps').value || 2); const W = S.src.w, H = S.src.h;
+  const oc = document.createElement('canvas'); oc.width = W; oc.height = H; const g = oc.getContext('2d');
+  const stream = oc.captureStream(0); const track = stream.getVideoTracks()[0];
+  const mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find(m => MediaRecorder.isTypeSupported(m));
+  const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 8e6 }); const chunks = []; rec.ondataavailable = ev => { if (ev.data.size) chunks.push(ev.data); };
+  const stopped = new Promise(r => { rec.onstop = r; });
+  $('bwebm').disabled = true; S.webmAbort = false; $('brfstop').hidden = false; $('brfstop').onclick = () => { S.webmAbort = true; };
+  rec.start(1000);
+  const t0 = performance.now(); const period = 1000 / fps;
+  for (let k = 0; k < list.length && !S.webmAbort; k++) {
+    const i = list[k]; const bm = await bitmapOf(i);
+    g.drawImage(bm, 0, 0); drawOverlay(g, { sx: 1, ox: 0, oy: 0, w: W, h: H }, i, S.labels[S.frames[i].name] || [], -1, true);
+    track.requestFrame && track.requestFrame();
+    $('notemsg').textContent = `WebM 녹화 중 ${k + 1}/${list.length} (실시간 재생 속도로 녹화되므로 영상 길이만큼 걸립니다)`;
+    const due = t0 + (k + 1) * period; await new Promise(r => setTimeout(r, Math.max(0, due - performance.now())));
+  }
+  rec.stop(); await stopped; track.stop();
+  $('bwebm').disabled = false; $('brfstop').hidden = true; $('brfstop').onclick = () => { S.rfAbort = true; };
+  const blob = new Blob(chunks, { type: 'video/webm' }); const r = await saveFile(blob, `${S.src.base}_review.webm`);
+  $('notemsg').textContent = `${S.src.base}_review.webm 저장 (${(blob.size / 1048576).toFixed(1)} MB, ${fps} fps, ${list.length} 프레임)` + saveNote2(r);
+};
+
+// save a generated file: inside the claude.ai artifact frame through its downloads capability, elsewhere a plain download
+async function saveFile(blob, filename) {
+  try {
+    if (window.claude && typeof window.claude.use === 'function') {
+      const dl = await window.claude.use('downloads');
+      if (dl) { await dl.save({ filename, data: blob }); return 'saved'; }
+    }
+  } catch (err) { return err && err.code === 'declined' ? 'declined' : 'blocked'; }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+  return inFrame ? 'blocked' : 'saved';
+}
+const saveNote2 = r => r === 'declined' ? '\n저장을 취소했습니다.' : r === 'blocked' ? '\n이 창에서는 다운로드가 막혀 있을 수 있습니다. HTML 파일을 직접 열어서 저장하세요.' : '';
+
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+setMode('Tin'); fitCanvas();
+// test hook
+window.T3 = { S, segmentAt, hsvOf, showFrame, extract, voteColor, yoloTxt, TIN_HUE, PAD_HUE, startLabeling, setReview, startPlay, stopPlay, renderNotes };
+})();
+</script>
+</body>
+</html>
