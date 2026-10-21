@@ -104,13 +104,15 @@ details summary { cursor: pointer; font-size: 12px; color: var(--muted); }
   <section id="stage">
     <div id="stageinfo" hidden></div>
     <canvas id="cv"></canvas>
-    <div id="empty">왼쪽 아래 설명대로 영상을 불러오고 프레임을 자르면<br>여기에 프레임이 나타납니다.<br><br>그 다음 캔 위를 클릭하면 Tin 박스, 패드 위를 클릭하면 Rag 박스가 생기고<br>색(Red/Green/Blue)은 HSV로 자동 판정됩니다.</div>
-    <div id="hint"><b>클릭</b> 현재 모드로 자동 박스 · <b>Shift+드래그</b> 수동 박스 · <b>드래그</b> 박스 이동/모서리 조절 · <b>우클릭</b> 삭제 · <b>T</b>/<b>R</b> 모드 · <b>←</b>/<b>→</b> 프레임 · <b>1 2 3</b> 선택 박스 색 Red/Green/Blue · <b>Q</b> Tin↔Rag · <b>C</b> 이전 프레임 박스 가져오기(재탐지) · <b>Ctrl+Z</b> 되돌리기</div>
+    <div id="empty">오른쪽 1번에서 영상이나 zip(이미지 모음)을 불러오면<br>여기에 프레임이 나타납니다.<br><br>"자동 라벨링"으로 1차 패스를 돌린 뒤 틀린 것만 고치거나,<br>캔 위를 클릭하면 Tin 박스, 패드 위를 클릭하면 Rag 박스가 생기고<br>색(Red/Green/Blue)은 HSV로 자동 판정됩니다.</div>
+    <div id="hint"><b>클릭</b> 현재 모드로 자동 박스 · <b>Shift+드래그</b> 수동 박스 · <b>드래그</b> 박스 이동/모서리 조절 · <b>우클릭</b> 삭제 · <b>T</b>/<b>R</b> 모드 · <b>←</b>/<b>→</b> 프레임 · <b>1 2 3</b> 선택 박스 색 Red/Green/Blue · <b>Q</b> Tin↔Rag · <b>C</b> 이전 프레임 박스 가져오기(재탐지) · <b>Ctrl+Z</b> 되돌리기 · <b>A</b> 이 프레임 자동 라벨링</div>
   </section>
   <aside>
     <div class="card" id="p1">
       <h2><span class="n">1</span>영상 불러오기</h2>
       <label class="file"><input type="file" id="fvideo" accept="video/*"><span>영상 파일 선택 (mp4 등)</span></label>
+      <label class="file"><input type="file" id="fzip" accept=".zip,application/zip"><span>또는 zip 파일 (이미지 모음 / YOLO zip)</span></label>
+      <div class="row"><label><input type="checkbox" id="zipimport" checked> zip 안의 labels/*.txt도 불러오기</label></div>
       <label class="file"><input type="file" id="fimages" accept="image/*" multiple><span>또는 이미 잘라둔 이미지 여러 장 선택</span></label>
       <div class="kv" id="srcinfo" hidden></div>
       <div class="row" id="restore" hidden><button class="small primary" id="brestore">이전 작업 복원</button><span class="msg" id="restoremsg"></span></div>
@@ -129,6 +131,10 @@ details summary { cursor: pointer; font-size: 12px; color: var(--muted); }
     </div>
     <div class="card off" id="p3">
       <h2><span class="n">3</span>클릭 라벨링</h2>
+      <div class="row"><button class="primary" id="bauto" style="flex:1">자동 라벨링 (전체 프레임 1차 패스)</button><button class="small" id="bautostop" hidden>중지</button></div>
+      <div class="row"><label><input type="checkbox" id="autoover"> 이미 라벨 있는 프레임도 다시</label></div>
+      <div class="prog"><i id="autoprog"></i></div>
+      <div class="msg" id="automsg">자동 패스 뒤에 틀린 박스만 클릭·드래그로 고치면 됩니다.</div>
       <div class="row"><button class="mode on" id="mtin">Tin (캔) <kbd>T</kbd></button><button class="mode" id="mrag">Rag (패드) <kbd>R</kbd></button></div>
       <div class="row"><button class="small" id="bprev">◀ 이전</button><input type="number" id="fidx" value="1" min="1" style="width:70px"><span class="msg" id="ftotal">/ 0</span><button class="small" id="bnext">다음 ▶</button><button class="small" id="bnextun">미라벨로</button></div>
       <input type="range" id="fslider" min="0" max="0" value="0">
@@ -269,6 +275,62 @@ $('fimages').addEventListener('change', async e => {
   if (saved) { S.labels = saved.labels || {}; S.uploaded = saved.uploaded || {}; S.notes = saved.notes || []; S.idx = clamp(saved.idx || 0, 0, files.length - 1); }
   startLabeling();
 });
+
+// minimal zip reader: central directory + stored/deflated entries (DecompressionStream, Chrome 103+)
+async function readZip(file) {
+  const buf = await file.arrayBuffer(); const dv = new DataView(buf); const dec = new TextDecoder();
+  let p = buf.byteLength - 22; while (p >= 0 && dv.getUint32(p, true) !== 0x06054b50) p--;
+  if (p < 0) throw new Error('zip 형식이 아닙니다');
+  const n = dv.getUint16(p + 10, true); let q = dv.getUint32(p + 16, true); const out = [];
+  for (let i = 0; i < n; i++) {
+    if (dv.getUint32(q, true) !== 0x02014b50) break;
+    const method = dv.getUint16(q + 10, true), csize = dv.getUint32(q + 20, true), nameLen = dv.getUint16(q + 28, true), extraLen = dv.getUint16(q + 30, true), commentLen = dv.getUint16(q + 32, true), loc = dv.getUint32(q + 42, true);
+    const name = dec.decode(new Uint8Array(buf, q + 46, nameLen));
+    out.push({ name, method, csize, loc }); q += 46 + nameLen + extraLen + commentLen;
+  }
+  const entryData = async e => {
+    const nl = dv.getUint16(e.loc + 26, true), el = dv.getUint16(e.loc + 28, true); const raw = new Uint8Array(buf, e.loc + 30 + nl + el, e.csize);
+    if (e.method === 0) return raw;
+    if (e.method !== 8) throw new Error(`지원하지 않는 압축 방식 (${e.method}): ${e.name}`);
+    return new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer());
+  };
+  return { entries: out.filter(e => !e.name.endsWith('/') && !/(^|\/)__MACOSX\//.test(e.name) && !/(^|\/)\./.test(e.name)), entryData };
+}
+$('fzip').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) return;
+  resetAll(); $('extmsg').textContent = 'zip 읽는 중...';
+  let z; try { z = await readZip(f); } catch (err) { $('extmsg').textContent = err.message; return; }
+  const imgs = z.entries.filter(en => /\.(jpe?g|png|webp|bmp)$/i.test(en.name)).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  if (!imgs.length) { $('extmsg').textContent = 'zip 안에 이미지(jpg/png)가 없습니다.'; return; }
+  const txts = new Map(z.entries.filter(en => /\.txt$/i.test(en.name) && !/classes\.txt$/i.test(en.name)).map(en => [en.name.split('/').pop().replace(/\.txt$/i, ''), en]));
+  const frames = []; const seen = new Set();
+  for (let i = 0; i < imgs.length; i++) {
+    const en = imgs[i]; let base = en.name.split('/').pop(); if (seen.has(base)) base = en.name.replace(/\//g, '_'); seen.add(base);
+    const data = await z.entryData(en); const mime = /\.png$/i.test(base) ? 'image/png' : /\.webp$/i.test(base) ? 'image/webp' : 'image/jpeg';
+    frames.push({ name: base, t: i, blob: new Blob([data], { type: mime }), w: 0, h: 0, txt: txts.get(base.replace(/\.[^.]+$/, '')) });
+    if (i % 10 === 0) { $('extmsg').textContent = `zip 압축 해제 ${i + 1} / ${imgs.length}`; $('extprog').style.width = (100 * (i + 1) / imgs.length) + '%'; await new Promise(r => setTimeout(r, 0)); }
+  }
+  const bm = await createImageBitmap(frames[0].blob);
+  S.src = { kind: 'images', name: f.name, base: sanitize(f.name), size: f.size, duration: 0, w: bm.width, h: bm.height };
+  S.storeKey = 't3click:zip:' + f.name + ':' + f.size;
+  S.frames = frames;
+  let nImported = 0;
+  if ($('zipimport').checked) {
+    for (const fr of frames) {
+      if (!fr.txt) continue; const txt = new TextDecoder().decode(await z.entryData(fr.txt));
+      const boxes = parseYolo(txt, bm.width, bm.height); if (boxes.length) { S.labels[fr.name] = boxes; nImported++; }
+    }
+  }
+  $('srcinfo').hidden = false;
+  $('srcinfo').innerHTML = `<span>zip</span><b>${esc(f.name)}</b><span>이미지</span><b>${frames.length} 장</b><span>해상도</span><b>${bm.width} × ${bm.height}</b>` + (nImported ? `<span>불러온 라벨</span><b>${nImported} 프레임</b>` : '');
+  $('extmsg').textContent = `zip에서 ${frames.length} 장 불러옴` + (nImported ? ` (라벨 ${nImported} 프레임 포함)` : '');
+  const saved = lsGet(S.storeKey);
+  if (saved && !nImported) { S.labels = saved.labels || {}; S.uploaded = saved.uploaded || {}; S.notes = saved.notes || []; S.idx = clamp(saved.idx || 0, 0, frames.length - 1); }
+  startLabeling();
+});
+function parseYolo(txt, W, H) {
+  return txt.split('\n').map(l => l.trim()).filter(Boolean).map(l => { const [c, x, y, w, h] = l.split(/\s+/).map(Number); const name = CLASSES[c]; if (!name || !(w > 0 && h > 0)) return null; const [col, k] = name.split('_'); return { k, c: col, x1: (x - w / 2) * W, y1: (y - h / 2) * H, x2: (x + w / 2) * W, y2: (y + h / 2) * H, flag: false }; }).filter(Boolean);
+}
 
 function resetAll() {
   S.frames = []; S.labels = {}; S.uploaded = {}; S.notes = []; S.idx = 0; S.sel = -1; S.hist = {}; S.bitmaps.clear(); S.hsv.clear();
@@ -492,7 +554,7 @@ function segmentRag(P, cx, cy) {
   const R2 = (fit.r * 1.06) ** 2;
   const pred2 = (i, x, y) => ((x - fit.cx) ** 2 + (y - fit.cy) ** 2 <= R2) && inBands(P.H[i], bands) && P.S[i] >= PAD_S && P.V[i] >= PAD_V;
   const r2 = grow(P, [], pred2, wx0, wy0, wx1, wy1, r1.vis);
-  return { k: 'Rag', c: color, x1: Math.max(0, r2.minx - 1), y1: Math.max(0, r2.miny - 1), x2: Math.min(P.w, r2.maxx + 2), y2: Math.min(P.h, r2.maxy + 2), flag: false };
+  return { k: 'Rag', c: color, x1: Math.max(0, r2.minx - 1), y1: Math.max(0, r2.miny - 1), x2: Math.min(P.w, r2.maxx + 2), y2: Math.min(P.h, r2.maxy + 2), flag: false, circ: { cx: fit.cx, cy: fit.cy, r: fit.r } };
 }
 function segmentTin(P, cx, cy) {
   const color = voteColor(P, cx, cy, 2, 120, TIN_V_MIN, TIN_HUE) || voteColor(P, cx, cy, 4, 120, TIN_V_MIN, TIN_HUE) || voteColor(P, cx, cy, 7, 100, TIN_V_MIN, TIN_HUE);
@@ -674,7 +736,7 @@ async function clickAt(x, y) {
   if (x < 0 || y < 0 || x >= view.w || y >= view.h) return;
   const box = await segmentAt(S.idx, x, y, S.mode);
   if (!box) { $('stageinfo').textContent += '  · 이 지점에서 패드 색을 찾지 못했습니다 (패드 페인트 위를 클릭하세요)'; return; }
-  pushHist(); const L = curLabels(); L.push(box); S.sel = L.length - 1; changed();
+  delete box.circ; pushHist(); const L = curLabels(); L.push(box); S.sel = L.length - 1; changed();
 }
 function drawMag(x, y) {
   const bm = S.bitmaps.get(S.idx); if (!bm) return;
@@ -700,6 +762,7 @@ async function copyPrev() {
   for (const b of prev) {
     const cx = (b.x1 + b.x2) / 2, cy = (b.y1 + b.y2) / 2;
     let nb = await segmentAt(S.idx, cx, cy, b.k);
+    if (nb) delete nb.circ;
     if (nb && !nb.flag && nb.c === b.c && iou(nb, b) > 0.15) L.push(nb); else L.push({ ...b, flag: true });
   }
   changed();
@@ -712,13 +775,14 @@ document.addEventListener('keydown', e => {
   if (k === 't') setMode('Tin'); else if (k === 'r') setMode('Rag');
   else if (k === ' ' && S.review) { e.preventDefault(); if (S.playing) stopPlay(); else startPlay(); }
   else if (k === 'arrowright' || k === 'd' || k === ' ') { e.preventDefault(); showFrame(S.idx + 1); }
-  else if (k === 'arrowleft' || k === 'a') { e.preventDefault(); showFrame(S.idx - 1); }
+  else if (k === 'arrowleft') { e.preventDefault(); showFrame(S.idx - 1); }
   else if ((k === 'delete' || k === 'backspace') && S.sel >= 0) { pushHist(); L.splice(S.sel, 1); S.sel = -1; changed(); }
   else if (k === 'z' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); undo(); }
   else if (k === 'c') copyPrev();
   else if ('123'.includes(k) && S.sel >= 0) { pushHist(); L[S.sel].c = COLORS[+k - 1]; L[S.sel].flag = false; changed(); }
   else if (k === 'q' && S.sel >= 0) { pushHist(); L[S.sel].k = L[S.sel].k === 'Tin' ? 'Rag' : 'Tin'; changed(); }
   else if (k === 'escape') { S.sel = -1; changed(); }
+  else if (k === 'a' && !e.ctrlKey) { pushHist(); autoLabelFrame(S.idx).then(b => { S.labels[S.frames[S.idx].name] = b; S.sel = -1; changed(); }); }
 });
 new ResizeObserver(() => draw()).observe($('stage'));
 
@@ -812,6 +876,186 @@ $('brf').onclick = async () => {
   if (ok) setStep(4);
 };
 
+// ---------- automatic first pass (simplified port of autolabel.py) ----------
+// Landing-gear corners (fractions of the frame): a pad-coloured blob lying wholly inside one is the gear.
+const CORNERS = [[0, 0, 0.15, 0.2], [0.85, 0, 1, 0.2]];
+const GEAR_MAX_FRAC = 0.02, SAME_COLOR_V_MAX = 0.45;
+function inCorner(x, y, W, H) { return CORNERS.some(c => x >= c[0] * W && x <= c[2] * W && y >= c[1] * H && y <= c[3] * H); }
+// 4-connected components of pred over the whole frame; returns [{area, minx, miny, maxx, maxy, cx, cy, seed}]
+function components(P, pred, minArea, lab) {
+  const W = P.w, H = P.h, n = W * H; lab.fill(0); const stack = new Int32Array(n); const out = []; let id = 0;
+  for (let s = 0; s < n; s++) {
+    if (lab[s] || !pred(s)) continue;
+    id++; let sp = 0; stack[sp++] = s; lab[s] = id;
+    let area = 0, minx = W, miny = H, maxx = -1, maxy = -1, sx = 0, sy = 0;
+    while (sp) {
+      const i = stack[--sp]; const x = i % W, y = (i / W) | 0; area++; sx += x; sy += y;
+      if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y;
+      if (x > 0 && !lab[i - 1] && pred(i - 1)) { lab[i - 1] = id; stack[sp++] = i - 1; }
+      if (x < W - 1 && !lab[i + 1] && pred(i + 1)) { lab[i + 1] = id; stack[sp++] = i + 1; }
+      if (y > 0 && !lab[i - W] && pred(i - W)) { lab[i - W] = id; stack[sp++] = i - W; }
+      if (y < H - 1 && !lab[i + W] && pred(i + W)) { lab[i + W] = id; stack[sp++] = i + W; }
+    }
+    if (area < minArea) continue;
+    const cx = sx / area, cy = sy / area; let best = -1, bd = 1e18;
+    for (let y = miny; y <= maxy; y++) for (let x = minx; x <= maxx; x++) { const i = y * W + x; if (lab[i] !== id) continue; const d = (x - cx) ** 2 + (y - cy) ** 2; if (d < bd) { bd = d; best = i; } }
+    out.push({ id, area, minx, miny, maxx, maxy, cx, cy, seed: best });
+  }
+  return out;
+}
+function pctl(arr, p) { if (!arr.length) return 0; const a = Float32Array.from(arr).sort(); return a[Math.min(a.length - 1, Math.floor(p * a.length))]; }
+async function autoLabelFrame(i) {
+  const P = await hsvOf(i); const W = P.w, H = P.h; const lab = new Int32Array(W * H);
+  const maxTin = Math.max(20, +$('maxtin').value || 120), maxRag = Math.max(60, +$('maxrag').value || 700);
+  const cand = [];
+  // 1) pads: strict paint components per colour, shape-tested, then the click grower from a seed on the paint
+  for (const c of COLORS) {
+    const bands = PAD_HUE[c];
+    const pred = idx => inBands(P.H[idx], bands) && P.S[idx] >= PAD_S_STRICT && P.V[idx] >= PAD_V_STRICT;
+    for (const k of components(P, pred, 200, lab)) {
+      const bw = k.maxx - k.minx + 1, bh = k.maxy - k.miny + 1; const edge = k.minx === 0 || k.miny === 0 || k.maxx === W - 1 || k.maxy === H - 1;
+      if (Math.max(bw, bh) > maxRag) continue;
+      // landing gear: red, in a top corner or hanging from the top edge at the sides, small
+      if (k.area < GEAR_MAX_FRAC * W * H && (CORNERS.some(cr => k.minx >= cr[0] * W && k.maxx <= cr[2] * W && k.miny >= cr[1] * H && k.maxy <= cr[3] * H) || (c === 'Red' && k.miny < 0.08 * H && (k.cx < 0.35 * W || k.cx > 0.65 * W) && Math.max(bw, bh) < 140))) continue;
+      const fill = k.area / (bw * bh), aspect = Math.max(bw, bh) / Math.min(bw, bh);
+      if (!edge && (fill < 0.5 || aspect > 2.5)) continue;
+      if (edge && (fill < 0.3 || aspect > 10)) continue;   // a sliver of a pad at the frame edge is long and thin
+      const b = segmentRag(P, k.seed % W, (k.seed / W) | 0); if (!b) continue;
+      b.seed = k.seed; cand.push(b);
+    }
+  }
+  cand.sort((a, b) => (b.x2 - b.x1) * (b.y2 - b.y1) - (a.x2 - a.x1) * (a.y2 - a.y1));
+  // one pad per colour in this task: same-colour overlaps are pieces of one pad (merge); a small blob of another
+  // colour inside a pad is a can, not a pad
+  const pads = [], tinSeeds = [];
+  for (const b of cand) {
+    const same = pads.find(p => p.c === b.c && (iou(p, b) > 0.1 || contains(p, b) > 0.5 || contains(b, p) > 0.5 || (p.x1 - 15 < b.x2 && p.x2 + 15 > b.x1 && p.y1 - 15 < b.y2 && p.y2 + 15 > b.y1)));
+    if (same) { same.x1 = Math.min(same.x1, b.x1); same.y1 = Math.min(same.y1, b.y1); same.x2 = Math.max(same.x2, b.x2); same.y2 = Math.max(same.y2, b.y2); continue; }
+    const host = pads.find(p => p.c !== b.c && contains(p, b) > 0.8);
+    if (host && Math.max(b.x2 - b.x1, b.y2 - b.y1) <= maxTin) { tinSeeds.push({ seed: b.seed, c: b.c }); continue; }
+    if (Math.max(b.x2 - b.x1, b.y2 - b.y1) < 45) continue;   // a red paver or a stain, never a pad
+    pads.push(b);
+  }
+  // 2) cans on each pad
+  const tins = [];
+  const pushTin = b => { const bw = b.x2 - b.x1, bh = b.y2 - b.y1; if (bw > maxTin * 1.2 || bh > maxTin * 1.2 || bw < 5 || bh < 5 || Math.max(bw, bh) / Math.min(bw, bh) > 2.2) return; if (!tins.some(t => iou(t, b) > 0.3)) tins.push(b); };
+  let dir = null; // sun direction (unit vector, can -> its shadow) learned from cans of another colour
+  for (const pad of pads) {
+    const cc = pad.circ || { cx: (pad.x1 + pad.x2) / 2, cy: (pad.y1 + pad.y2) / 2, r: Math.max(pad.x2 - pad.x1, pad.y2 - pad.y1) / 2 };
+    const vs = []; const pb = PAD_HUE[pad.c];
+    for (let y = Math.max(0, pad.y1 | 0); y < Math.min(H, pad.y2); y += 2) for (let x = Math.max(0, pad.x1 | 0); x < Math.min(W, pad.x2); x += 2) { const idx = y * W + x; if (inBands(P.H[idx], pb) && P.S[idx] >= PAD_S_STRICT && P.V[idx] >= PAD_V_STRICT) vs.push(P.V[idx]); }
+    const padV = pctl(vs, 0.5) || 180;
+    const inside = (idx, shrink) => { const x = idx % W, y = (idx / W) | 0; return ((x - cc.cx) ** 2 + (y - cc.cy) ** 2) <= (cc.r * shrink) ** 2; };
+    const darkPad = idx => inBands(P.H[idx], TIN_HUE[pad.c]) && P.S[idx] >= 200 && P.V[idx] >= 4 && P.V[idx] <= SAME_COLOR_V_MAX * padV;
+    const litCan = idx => inBands(P.H[idx], TIN_HUE[pad.c]) && P.S[idx] >= 200 && P.V[idx] <= 0.75 * padV;
+    // (a) a can of another colour: its own hue, saturated, compact
+    const other = [];
+    for (const c of COLORS) {
+      if (c === pad.c) continue; const tb = PAD_HUE[c];
+      const pred = idx => inside(idx, 0.97) && inBands(P.H[idx], tb) && P.S[idx] >= 200 && P.V[idx] >= TIN_V_MIN;
+      for (const k of components(P, pred, 20, lab)) {
+        const bw = k.maxx - k.minx + 1, bh = k.maxy - k.miny + 1; if (bw > maxTin || bh > maxTin || bw < 6 || bh < 6 || k.area / (bw * bh) < 0.4 || Math.max(bw, bh) / Math.min(bw, bh) > 2.2) continue;
+        const sv = []; for (let y = k.miny; y <= k.maxy; y++) for (let x = k.minx; x <= k.maxx; x++) { const idx = y * W + x; if (lab[idx] === k.id) sv.push(P.S[idx]); }
+        if (pctl(sv, 0.5) < 225) continue;   // the leg's sheen and board stains are never this saturated
+        other.push({ k, c });
+      }
+    }
+    for (const ts of tinSeeds) if (inside(ts.seed, 1)) other.push({ k: { seed: ts.seed, minx: ts.seed % W, maxx: ts.seed % W, miny: (ts.seed / W) | 0, maxy: (ts.seed / W) | 0 }, c: ts.c });
+    const padTins = [];
+    for (const { k, c } of other) {
+      const sx = k.seed % W, sy = (k.seed / W) | 0; if (inCorner(sx, sy, W, H)) continue;
+      let b = segmentTin(P, sx, sy);
+      if (!b || b.flag) b = { k: 'Tin', c, x1: Math.max(0, k.minx - 1), y1: Math.max(0, k.miny - 1), x2: Math.min(W, k.maxx + 2), y2: Math.min(H, k.maxy + 2), flag: true };
+      if (b.c === pad.c) b.c = c;
+      padTins.push(b); pushTin(b);
+    }
+    // (b) dark same-hue blobs on the pad: a can of the pad's own colour plus its shadow, or another can's shadow
+    const blobs = [];
+    {
+      const pred = idx => inside(idx, 0.92) && darkPad(idx);
+      const strict = idx => inBands(P.H[idx], pb) && P.S[idx] >= PAD_S_STRICT && P.V[idx] >= PAD_V_STRICT;
+      for (const k of components(P, pred, 10, lab)) {
+        const bw = k.maxx - k.minx + 1, bh = k.maxy - k.miny + 1; if (bw > 1.8 * maxTin || bh > 1.8 * maxTin || k.area / (bw * bh) < 0.3) continue;
+        // a can stands in lit paint: most of a ring around the blob is bright paint (a dark rim under the drone's shadow is not)
+        const t = Math.max(4, 0.5 * Math.max(bw, bh)) | 0; let lit = 0, tot = 0;
+        for (let y = Math.max(0, k.miny - t); y <= Math.min(H - 1, k.maxy + t); y++) for (let x = Math.max(0, k.minx - t); x <= Math.min(W - 1, k.maxx + t); x++) { if (x >= k.minx && x <= k.maxx && y >= k.miny && y <= k.maxy) continue; tot++; if (strict(y * W + x)) lit++; }
+        if (!tot || lit / tot < 0.6) continue;
+        if (Math.max(bw, bh) < 0.07 * 2 * cc.r) continue;   // a can is at least ~7 % of the pad's diameter; smaller dark specks are rim and dirt
+        const pts = []; for (let y = k.miny; y <= k.maxy; y++) for (let x = k.minx; x <= k.maxx; x++) if (lab[y * W + x] === k.id) pts.push(x, y);
+        blobs.push({ k, pts, shadow: false });
+      }
+    }
+    // the sun direction: for each can of another colour, the largest dark blob touching it is its shadow
+    let sumx = 0, sumy = 0, sumw = 0;
+    for (const t of padTins) {
+      let best = null;
+      for (const bl of blobs) { const k = bl.k; if (k.minx <= t.x2 + 3 && k.maxx >= t.x1 - 3 && k.miny <= t.y2 + 3 && k.maxy >= t.y1 - 3) { if (!best || k.area > best.k.area) best = bl; } }
+      if (!best) continue; best.shadow = true;
+      const dx = best.k.cx - (t.x1 + t.x2) / 2, dy = best.k.cy - (t.y1 + t.y2) / 2, l = Math.hypot(dx, dy); if (l < 2) continue;
+      sumx += dx / l * best.k.area; sumy += dy / l * best.k.area; sumw += best.k.area;
+      if (S.dbg) S.dbg.push({ pad: pad.c, can: t, shadowBlob: [best.k.minx, best.k.miny, best.k.maxx, best.k.maxy], dx, dy });
+    }
+    if (sumw) { const l = Math.hypot(sumx, sumy); if (l > 0) { dir = { x: sumx / l, y: sumy / l }; S.lastDir = dir; } }
+    const useDir = dir || S.lastDir || null;
+    for (const bl of blobs) {
+      if (bl.shadow) continue; const k = bl.k, pts = bl.pts; const bw = k.maxx - k.minx + 1, bh = k.maxy - k.miny + 1;
+      let b;
+      if (useDir) {
+        const px = -useDir.y, py = useDir.x; let pmin = 1e9, pmax = -1e9, qmin = 1e9;
+        for (let j = 0; j < pts.length; j += 2) { const a = pts[j] * px + pts[j + 1] * py, q = pts[j] * useDir.x + pts[j + 1] * useDir.y; if (a < pmin) pmin = a; if (a > pmax) pmax = a; if (q < qmin) qmin = q; }
+        // the shadow widens the blob, so measure the can's diameter on the far end only (iterate)
+        let d = pmax - pmin, x1 = W, y1 = H, x2 = -1, y2 = -1, n = 0;
+        for (let it = 0; it < 3; it++) {
+          let a0 = 1e9, a1 = -1e9; x1 = W; y1 = H; x2 = -1; y2 = -1; n = 0;
+          for (let j = 0; j < pts.length; j += 2) { const q = pts[j] * useDir.x + pts[j + 1] * useDir.y; if (q > qmin + d * 1.05) continue; const a = pts[j] * px + pts[j + 1] * py; if (a < a0) a0 = a; if (a > a1) a1 = a; n++; if (pts[j] < x1) x1 = pts[j]; if (pts[j] > x2) x2 = pts[j]; if (pts[j + 1] < y1) y1 = pts[j + 1]; if (pts[j + 1] > y2) y2 = pts[j + 1]; }
+          const d2 = a1 - a0; if (d2 >= d - 0.5) break; d = d2;
+        }
+        if (n < 10 || n / ((x2 - x1 + 1) * (y2 - y1 + 1)) < 0.45) continue;
+        // the can's sunlit side is brighter than the dark threshold: walk away from the shadow over same-hue
+        // pixels that are still darker than the paint and extend the box by that distance
+        const mx = (x1 + x2) / 2, my = (y1 + y2) / 2; let ext = 0; const cap = 0.7 * d;
+        for (const off of [-d / 4, 0, d / 4]) {
+          const ox = mx + px * off, oy = my + py * off; let t0 = 0;
+          for (; t0 < d; t0 += 0.5) { const x = Math.round(ox - useDir.x * t0), y = Math.round(oy - useDir.y * t0); if (x < x1 || x > x2 || y < y1 || y > y2) break; }
+          let hit = 0; for (let t = 0; t < cap; t += 0.5) { const x = Math.round(ox - useDir.x * (t0 + t)), y = Math.round(oy - useDir.y * (t0 + t)); if (x < 0 || y < 0 || x >= W || y >= H || !litCan(y * W + x)) break; hit = t; }
+          if (hit > ext) ext = hit;
+        }
+        b = { k: 'Tin', c: pad.c, x1: Math.max(0, Math.min(x1, x1 - useDir.x * ext) - 1), y1: Math.max(0, Math.min(y1, y1 - useDir.y * ext) - 1), x2: Math.min(W, Math.max(x2, x2 - useDir.x * ext) + 2), y2: Math.min(H, Math.max(y2, y2 - useDir.y * ext) + 2), flag: false };
+        for (const kk of ['x1', 'y1', 'x2', 'y2']) b[kk] = Math.round(b[kk]);
+        if (S.dbg) S.dbg.push({ pad: pad.c, blob: [k.minx, k.miny, k.maxx, k.maxy], dir: useDir, d, ext, box: { ...b } });
+      } else {
+        if (k.area / (bw * bh) < 0.5) continue;
+        b = { k: 'Tin', c: pad.c, x1: Math.max(0, k.minx - 1), y1: Math.max(0, k.miny - 1), x2: Math.min(W, k.maxx + 2), y2: Math.min(H, k.maxy + 2), flag: true };
+      }
+      if (inCorner((b.x1 + b.x2) / 2, (b.y1 + b.y2) / 2, W, H)) continue;
+      pushTin(b);
+    }
+  }
+  for (const p of pads) { delete p.circ; delete p.seed; }
+  return [...pads, ...tins];
+}
+function contains(outer, inner) { const ix = Math.max(0, Math.min(outer.x2, inner.x2) - Math.max(outer.x1, inner.x1)), iy = Math.max(0, Math.min(outer.y2, inner.y2) - Math.max(outer.y1, inner.y1)); return ix * iy / Math.max(1, (inner.x2 - inner.x1) * (inner.y2 - inner.y1)); }
+async function runAutoLabel() {
+  if (!S.frames.length) return; const over = $('autoover').checked;
+  const todo = []; S.frames.forEach((f, i) => { if (over || !(S.labels[f.name] || []).length) todo.push(i); });
+  if (!todo.length) { $('automsg').textContent = '모든 프레임에 이미 라벨이 있습니다 ("다시" 체크 시 덮어씀).'; return; }
+  S.autoAbort = false; $('bauto').disabled = true; $('bautostop').hidden = false; const t0 = performance.now(); let nb = 0;
+  for (let j = 0; j < todo.length && !S.autoAbort; j++) {
+    const i = todo[j]; const f = S.frames[i];
+    const h = S.hist[f.name] || (S.hist[f.name] = []); h.push(JSON.stringify(S.labels[f.name] || []));
+    const boxes = await autoLabelFrame(i); S.labels[f.name] = boxes; nb += boxes.length;
+    if (i === S.idx) { draw(); renderList(); }
+    $('autoprog').style.width = (100 * (j + 1) / todo.length) + '%';
+    $('automsg').textContent = `자동 라벨링 ${j + 1} / ${todo.length} 프레임, ${nb} 박스 (${((performance.now() - t0) / 1000).toFixed(0)}초)`;
+    S.hsv.delete(i); if (S.bitmaps.size > 4) { for (const k of S.bitmaps.keys()) { if (k !== S.idx && k !== i) { S.bitmaps.get(k).close(); S.bitmaps.delete(k); break; } } }
+    await new Promise(r => setTimeout(r, 0));
+  }
+  $('bauto').disabled = false; $('bautostop').hidden = true;
+  $('automsg').textContent = (S.autoAbort ? '중지됨. ' : '') + `자동 라벨링 끝: ${Math.min(todo.length, S.autoAbort ? todo.length : todo.length)} 프레임 중 처리 완료, ${nb} 박스 (${((performance.now() - t0) / 1000).toFixed(0)}초). 이제 프레임을 넘기며 틀린 박스만 고치세요.`;
+  changed();
+}
+$('bauto').onclick = runAutoLabel; $('bautostop').onclick = () => { S.autoAbort = true; };
+
 // ---------- review: playback, pins, notes export, label import, webm ----------
 function setReview(on) {
   S.review = on; S.sel = -1; if (!on) stopPlay();
@@ -895,7 +1139,7 @@ $('fimport').addEventListener('change', async e => {
   for (const file of files) {
     const stem = file.name.replace(/\.txt$/i, ''); const f = byStem.get(stem); if (!f) { miss.push(file.name); continue; }
     const W = f.w || S.src.w, H = f.h || S.src.h; const txt = await file.text();
-    const boxes = txt.split('\n').map(l => l.trim()).filter(Boolean).map(l => { const [c, x, y, w, h] = l.split(/\s+/).map(Number); const name = CLASSES[c]; if (!name) return null; const [col, k] = name.split('_'); return { k, c: col, x1: (x - w / 2) * W, y1: (y - h / 2) * H, x2: (x + w / 2) * W, y2: (y + h / 2) * H, flag: false }; }).filter(Boolean);
+    const boxes = parseYolo(txt, W, H);
     const h = S.hist[f.name] || (S.hist[f.name] = []); h.push(JSON.stringify(S.labels[f.name] || []));
     S.labels[f.name] = boxes; n++; nb += boxes.length;
   }
@@ -943,7 +1187,7 @@ const saveNote2 = r => r === 'declined' ? '\n저장을 취소했습니다.' : r 
 function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 setMode('Tin'); fitCanvas();
 // test hook
-window.T3 = { S, segmentAt, hsvOf, showFrame, extract, voteColor, yoloTxt, TIN_HUE, PAD_HUE, startLabeling, setReview, startPlay, stopPlay, renderNotes };
+window.T3 = { S, segmentAt, hsvOf, showFrame, extract, voteColor, yoloTxt, TIN_HUE, PAD_HUE, startLabeling, setReview, startPlay, stopPlay, renderNotes, autoLabelFrame, runAutoLabel, readZip };
 })();
 </script>
 </body>
