@@ -678,8 +678,11 @@ function renderList() {
     const d = document.createElement('div'); d.className = 'bx' + (j === S.sel ? ' sel' : '');
     const opts = CLASSES.map(c => `<option${c === b.c + '_' + b.k ? ' selected' : ''}>${c}</option>`).join('');
     d.innerHTML = `<i style="background:${SWATCH[b.c]}"></i><select>${opts}</select><span class="sz">${Math.round(b.x2 - b.x1)}×${Math.round(b.y2 - b.y1)}${b.flag ? ' <span class="flag">확인</span>' : ''}</span><button class="small">✕</button>`;
-    d.onclick = () => { S.sel = j; draw(); renderList(); };
-    d.querySelector('select').onchange = e => { pushHist(); const [c, k] = e.target.value.split('_'); b.c = c; b.k = k; b.flag = false; changed(); };
+    // a click on the row selects the box; a click inside the <select> must not rebuild the list, or the dropdown closes at once
+    d.onclick = e => { if (e.target.closest('select,button')) return; S.sel = j; draw(); renderList(); };
+    const sel = d.querySelector('select');
+    sel.onpointerdown = sel.onclick = e => { e.stopPropagation(); if (S.sel !== j) { S.sel = j; draw(); d.parentElement.querySelectorAll('.bx.sel').forEach(x => x.classList.remove('sel')); d.classList.add('sel'); } };
+    sel.onchange = e => { pushHist(); const [c, k] = e.target.value.split('_'); b.c = c; b.k = k; b.flag = false; changed(); };
     d.querySelector('button').onclick = e => { e.stopPropagation(); pushHist(); L.splice(j, 1); S.sel = -1; changed(); };
     el.appendChild(d);
   });
