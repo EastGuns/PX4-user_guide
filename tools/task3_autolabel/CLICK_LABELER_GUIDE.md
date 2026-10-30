@@ -3,6 +3,7 @@
 `click_labeler.html` 한 파일로 돌아가는 반자동 라벨링 도구입니다. 설치할 것이 없고, 영상이나 이미지 zip을 넣고 "자동 라벨링"으로 1차 패스를 돌린 뒤 틀린 것만 고치거나, 물체를 클릭해서 박스와 클래스(색_종류)를 만듭니다. 결과는 기존 자동 라벨러와 같은 YOLO 구조(images/labels/data.yaml)로 저장되고, Roboflow에 바로 올릴 수도 있습니다.
 
 가장 빠른 흐름: **zip 선택 → 자동 라벨링 → 프레임 넘기며 틀린 박스만 고침 → zip 저장 또는 Roboflow 업로드.**
+학습까지: **GPU PC에서 `학습서버_시작.bat` 실행 → 열린 페이지의 패널 6에서 Roboflow zip 선택 → 학습 시작 → Hailo 번들 zip을 Ubuntu로.** (4장)
 
 ## 1. 열기
 
@@ -36,7 +37,26 @@
 5. 돌아온 txt들을 "수정된 라벨 txt 가져오기"로 선택하면 같은 이름의 프레임에 덮어써집니다. 그 다음 다시 zip 저장 또는 Roboflow 업로드.
 6. 영상 파일이 필요하면 "점검 영상 WebM 저장"을 누르세요. 실시간 속도로 녹화되므로 영상 길이만큼 걸립니다 (예: 245프레임 2 fps → 약 2분).
 
-## 4. 자동 탐지가 하는 일과 한계
+## 4. PC에서 학습 (패널 6)
+
+브라우저만으로는 GPU 학습을 못 하므로, 학습은 PC에서 켜는 작은 서버(`trainer/task3_train_server.py`)가 맡습니다. 라벨링과 따로 써도 됩니다.
+
+1. GPU PC(아나콘다 base에 CUDA용 torch와 ultralytics가 있는 PC)에서 `학습서버_시작.bat`을 더블클릭합니다. 검은 창이 뜨고, 브라우저에 라벨러가 `http://127.0.0.1:8765` 주소로 열립니다. 패널 6 맨 위에 GPU 이름이 보이면 준비된 것입니다. **이 창을 닫으면 서버와 진행 중인 학습이 함께 끝납니다.**
+2. 패널 6의 "Roboflow zip 선택"에서 Roboflow → Versions → Download Dataset → **YOLOv11** 형식으로 받은 zip을 고릅니다. "점검용 원본 영상"에 Task3 원본 영상을 넣으면 학습 뒤에 박스와 프레임 번호를 그린 점검 영상도 만듭니다(선택).
+3. 에폭(기본 100)과 배치(기본 8)를 확인하고 "학습 시작". 단계별 진행, 에폭마다 mAP 그래프, 남은 학습 시간이 보입니다. "중지"로 언제든 멈출 수 있습니다.
+4. 끝나면 valid/test 클래스별 P/R/mAP 표와 파일 링크(Hailo 번들 zip, 가중치 .pt, ONNX, 점검 영상, REPORT.md)가 나옵니다. "폴더 열기"를 누르면 결과 폴더(`train_runs/runs/날짜_시각_v버전/`)가 탐색기로 열립니다. 페이지를 새로 고치거나 서버를 다시 켜도 마지막 결과가 다시 보입니다.
+5. `task3_hailo_bundle_v버전.zip`을 Ubuntu Hailo PC로 옮겨 풀고 `bash hailo/compile.sh task3_yolo11n_v버전.onnx calib1024 hailo10h`를 실행합니다. 나온 `hef_out/tin_detector.hef`를 파이의 `~/models/tin_detector.hef`로 교체합니다(기존 파일은 백업).
+
+서버가 하는 일 (레시피는 `tools/task3_train/train.py`와 같습니다):
+- zip을 풀고 data.yaml의 클래스가 드론 노드 순서(Blue_Rag, Blue_Tin, Green_Rag, Green_Tin, Red_Rag, Red_Tin)인지 확인합니다. 순서만 다르면 라벨 번호를 고쳐 쓰고, 모르는 이름(예: Red_Pad)이 있으면 학습하지 않고 멈춥니다. Roboflow의 train/valid/test 분할은 그대로 씁니다.
+- COCO 사전학습 `yolo11n.pt`에서 imgsz 640, hsv_h 0.005(색이 곧 클래스), flipud/fliplr 0.5, degrees 10, mosaic으로 학습합니다. GPU가 있으면 GPU를 씁니다.
+- valid/test 평가 → (점검 영상, conf 0.4) → ONNX(opset 11, NMS 없음, Hailo end node 확인, .pt와 출력 대조) → 배포와 같은 640 letterbox 보정 이미지 1024장 → 번들 zip(ONNX + calib1024 + hailo/compile.sh + REPORT.md + 컴파일 안내).
+- 처음 한 번은 `yolo11n.pt`(약 5 MB)를 내려받으므로 인터넷이 필요합니다. 같은 zip이나 영상을 다시 고르면 PC에 이미 있는 사본을 써서 바로 시작합니다.
+- 다른 파이썬을 쓰려면 `T3_PYTHON` 환경변수에 python.exe 경로를 넣고 bat을 실행하세요. 맥/리눅스는 `python trainer/task3_train_server.py`.
+- 서버는 이 PC의 브라우저(127.0.0.1)에서만 열리고, 다른 사이트의 요청은 받지 않습니다. 아티팩트 미리보기 창이나 파일로 연 페이지에서는 패널 6이 안내만 보여 줍니다.
+- Roboflow의 "Train Model" 버튼은 쓰지 않습니다. .pt를 받을 수 없어 hef로 바꿀 수 없기 때문입니다.
+
+## 5. 자동 탐지가 하는 일과 한계
 
 - 자동 1차 패스(autolabel.py를 단순화해 JS로 옮긴 것): 색마다 진한 페인트(S≥235, V≥110) 덩어리를 찾아 모양(채움비·종횡비·크기·착륙 다리 코너)을 거르고, 덩어리 위 한 점에서 클릭 탐지기(원 맞춤 + 그림자 보강)를 돌려 패드 박스를 만듭니다. 같은 색 덩어리는 한 패드로 합치고, 다른 색 패드 안의 작은 덩어리는 캔으로 돌립니다. 캔은 패드 원 안에서 (a) 다른 색상대의 채도 높은 작은 덩어리, (b) 패드와 같은 색이지만 페인트의 45% 이하로 어두운 덩어리를 찾습니다. (b)는 캔+그림자이므로, 다른 색 캔에 붙은 어두운 덩어리에서 그 프레임의 해 방향을 배우고, 그 반대쪽 끝의 둥근 부분만 캔으로 자릅니다(해 방향 정보가 없으면 "?"로 표시).
 - 색 판정 HSV(OpenCV 스케일, H 0–179): Red 0–12/165–179, Green 40–90, Blue 95–135. 기존 `autolabel.py`와 같은 값입니다.
@@ -45,7 +65,7 @@
 - 검증 결과(기존 자동 라벨 245프레임 중 601박스를 같은 지점 클릭으로 재현): Tin IoU 중앙값 0.89(0.5 이상 98%), Rag 0.99(0.5 이상 99%), 색 판정 598/601 일치.
 - 잘 안 되는 경우: 화면 가장자리에서 잘리고 그림자까지 진 패드(박스가 짧게 나옴), 10 px짜리 아주 먼 캔(옆 캔 색으로 판정될 수 있음), 자기 그림자가 큰 캔(한쪽이 조금 잘림). 모두 드래그로 바로 고칠 수 있습니다.
 
-## 5. Claude에게 줄 프롬프트 (같은 도구를 다시 만들거나 확장할 때)
+## 6. Claude에게 줄 프롬프트 (같은 도구를 다시 만들거나 확장할 때)
 
 아래를 그대로 붙여 넣으면 됩니다.
 
@@ -84,5 +104,11 @@
 - "수정된 라벨 txt 가져오기": 같은 이름의 프레임 라벨을 덮어쓴다.
 - "점검 영상 WebM 저장": canvas.captureStream + MediaRecorder로 박스 그린 프레임을 실시간 속도로 녹화.
 
-제약: 외부 라이브러리 없이 HTML/CSS/JS 한 파일, Chrome/Edge에서 file:// 로 열어도 동작, 원본 영상은 절대 수정하지 않고 결과는 새 파일로만 저장, UI는 한국어.
+PC 학습 (패널 6, 브라우저는 GPU 학습을 못 하므로 로컬 서버를 함께 만든다):
+- trainer/task3_train_server.py: 파이썬 표준 라이브러리만 쓰는 HTTP 서버. 127.0.0.1:8765(사용 중이면 다음 포트)에만 열고 라벨러 HTML을 / 로 내준다. Host 헤더가 127.0.0.1/localhost:포트가 아니면 거부, POST는 X-T3 헤더와 같은 출처 Origin일 때만 받는다. API: /api/ping(파이썬·torch·CUDA·ultralytics 버전), /api/upload(원본 파일 바이트, 이름+크기로 캐시), /api/train, /api/status, /api/stop(프로세스 트리 종료), /api/file(결과 다운로드), /api/open(결과 폴더 열기).
+- trainer/task3_train_job.py: 학습 한 번을 별도 프로세스로 실행하고 status.json에 단계·에폭·배치·지표를 쓴다. 단계: zip 풀기와 클래스 이름 검사(드론 순서로 재매핑, 모르는 이름이면 중단) → Ultralytics YOLO11n 학습(COCO yolo11n.pt, imgsz 640, batch 8, 100 에폭, hsv_h 0.005, hsv_s 0.5, hsv_v 0.4, degrees 10, translate 0.1, scale 0.5, flipud/fliplr 0.5, mosaic 1, close_mosaic 10, cos_lr, seed 0) → valid/test 클래스별 P/R/mAP50/mAP50-95 → 선택한 영상의 점검 영상(conf 0.4, 왼쪽 아래 프레임 번호) → ONNX(opset 11, NMS 없음, 1x3x640x640, /model.23/cv2.x·cv3.x end node 확인, onnxruntime으로 .pt와 출력 대조) → 114 회색 letterbox 보정 이미지 1024장(부족하면 영상 프레임, 그래도 부족하면 뒤집은 학습 프레임) → ONNX + calib1024 + hailo/compile.sh(LF 줄바꿈) + REPORT.md 번들 zip.
+- 학습서버_시작.bat: 아나콘다/미니콘다 base를 찾아 활성화하고 KMP_DUPLICATE_LIB_OK=TRUE, PYTHONUTF8=1로 서버를 실행한다.
+- 페이지 패널 6: 서버 연결과 GPU 표시, Roboflow zip·점검 영상 선택, 에폭·배치, 업로드 진행률, 단계 목록, 에폭별 mAP 그래프, 남은 시간, 결과 표와 파일 링크, 로그.
+
+제약: 라벨러는 외부 라이브러리 없이 HTML/CSS/JS 한 파일, Chrome/Edge에서 file:// 로 열어도 동작(학습 패널만 서버 주소에서 켜짐), 원본 영상은 절대 수정하지 않고 결과는 새 파일로만 저장, UI는 한국어.
 ```
