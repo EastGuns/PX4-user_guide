@@ -39,6 +39,8 @@ main { flex: 1; display: grid; grid-template-columns: 1fr 340px; min-height: 0; 
 #cv { flex: 1; width: 100%; height: 100%; display: block; cursor: crosshair; touch-action: none; }
 #cv.grab { cursor: move; }
 #cv.resize { cursor: nwse-resize; }
+#cv.pan { cursor: grabbing; }
+#zoombadge { position: absolute; right: 10px; top: 8px; font: 12px var(--mono); color: #e8ecef; background: rgba(0,0,0,.45); padding: 2px 8px; border-radius: 4px; pointer-events: none; }
 #stageinfo { position: absolute; left: 10px; top: 8px; font: 12px var(--mono); color: #e8ecef; background: rgba(0,0,0,.45); padding: 2px 8px; border-radius: 4px; pointer-events: none; }
 #hint { font-size: 12px; color: #c3cad0; background: rgba(0,0,0,.55); padding: 5px 10px; line-height: 1.5; }
 #hint b { color: #fff; font-weight: 600; }
@@ -103,9 +105,10 @@ details summary { cursor: pointer; font-size: 12px; color: var(--muted); }
 <main>
   <section id="stage">
     <div id="stageinfo" hidden></div>
+    <div id="zoombadge" hidden></div>
     <canvas id="cv"></canvas>
     <div id="empty">오른쪽 1번에서 영상이나 zip(이미지 모음)을 불러오면<br>여기에 프레임이 나타납니다.<br><br>"자동 라벨링"으로 1차 패스를 돌린 뒤 틀린 것만 고치거나,<br>캔 위를 클릭하면 Tin 박스, 패드 위를 클릭하면 Rag 박스가 생기고<br>색(Red/Green/Blue)은 HSV로 자동 판정됩니다.</div>
-    <div id="hint"><b>클릭</b> 현재 모드로 자동 박스 · <b>Shift+드래그</b> 수동 박스 · <b>드래그</b> 박스 이동/모서리 조절 · <b>우클릭</b> 삭제 · <b>T</b>/<b>R</b> 모드 · <b>←</b>/<b>→</b> 프레임 · <b>1 2 3</b> 선택 박스 색 Red/Green/Blue · <b>Q</b> Tin↔Rag · <b>C</b> 이전 프레임 박스 가져오기(재탐지) · <b>Ctrl+Z</b> 되돌리기 · <b>A</b> 이 프레임 자동 라벨링</div>
+    <div id="hint"><b>클릭</b> 현재 모드로 자동 박스 · <b>Shift+드래그</b> 수동 박스 · <b>드래그</b> 박스 이동/모서리 조절 · <b>우클릭</b> 삭제 · <b>T</b>/<b>R</b> 모드 · <b>←</b>/<b>→</b> 프레임 · <b>1 2 3</b> 선택 박스 색 Red/Green/Blue · <b>Q</b> Tin↔Rag · <b>C</b> 이전 프레임 박스 가져오기(재탐지) · <b>Ctrl+Z</b> 되돌리기 · <b>A</b> 이 프레임 자동 라벨링 · <b>휠</b> 확대/축소 · <b>휠 누른 채 드래그</b> 또는 <b>Alt+드래그</b> 이동 · <b>0</b> 원래 크기</div>
   </section>
   <aside>
     <div class="card" id="p1">
@@ -333,7 +336,7 @@ function parseYolo(txt, W, H) {
 }
 
 function resetAll() {
-  S.frames = []; S.labels = {}; S.uploaded = {}; S.notes = []; S.idx = 0; S.sel = -1; S.hist = {}; S.bitmaps.clear(); S.hsv.clear();
+  S.frames = []; S.labels = {}; S.uploaded = {}; S.notes = []; S.idx = 0; S.sel = -1; S.hist = {}; S.bitmaps.clear(); S.hsv.clear(); zoom.z = 1; zoom.px = 0; zoom.py = 0;
   if (S.review) setReview(false); stopPlay(); $('notes').innerHTML = ''; $('notemsg').textContent = '';
   $('restore').hidden = true; $('boxes').innerHTML = ''; $('zipmsg').textContent = ''; $('rfmsg').textContent = '';
 }
@@ -594,13 +597,33 @@ async function segmentAt(i, x, y, kind) {
 
 // ---------- rendering ----------
 let view = { sx: 1, ox: 0, oy: 0, w: 0, h: 0 };
+const zoom = { z: 1, px: 0, py: 0 }; // z = magnification over the fitted size, px/py = pan in screen px
+const ZMAX = 16;
 function fitCanvas() {
   const r = cv.getBoundingClientRect(); const dpr = window.devicePixelRatio || 1;
   if (cv.width !== Math.round(r.width * dpr) || cv.height !== Math.round(r.height * dpr)) { cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr); }
   const f = S.frames[S.idx]; const w = f ? f.w || S.src.w : 16, h = f ? f.h || S.src.h : 9;
-  const s = Math.min(r.width / w, r.height / h);
-  view = { sx: s, ox: (r.width - w * s) / 2, oy: (r.height - h * s) / 2, w, h, dpr };
+  const s = Math.min(r.width / w, r.height / h) * zoom.z;
+  // the image may not leave an empty gap on a side it is big enough to cover
+  const cw = w * s, ch = h * s;
+  let ox = (r.width - cw) / 2, oy = (r.height - ch) / 2;
+  if (cw > r.width) { ox = clamp(ox + zoom.px, r.width - cw, 0); zoom.px = ox - (r.width - cw) / 2; } else zoom.px = 0;
+  if (ch > r.height) { oy = clamp(oy + zoom.py, r.height - ch, 0); zoom.py = oy - (r.height - ch) / 2; } else zoom.py = 0;
+  view = { sx: s, ox, oy, w, h, dpr };
 }
+// zoom by factor f, keeping the image point under screen position (mx,my) fixed
+function zoomAt(f, mx, my) {
+  if (!S.frames.length) return;
+  fitCanvas(); const p = toImg(mx, my);
+  zoom.z = clamp(zoom.z * f, 1, ZMAX); if (zoom.z < 1.02) zoom.z = 1;
+  fitCanvas(); const q = toScr(p.x, p.y); zoom.px += mx - q.x; zoom.py += my - q.y;
+  draw();
+}
+function resetZoom() { zoom.z = 1; zoom.px = 0; zoom.py = 0; draw(); }
+cv.addEventListener('wheel', e => {
+  if (!S.frames.length) return; e.preventDefault();
+  const r = cv.getBoundingClientRect(); zoomAt(e.deltaY < 0 ? 1.25 : 0.8, e.clientX - r.left, e.clientY - r.top);
+}, { passive: false });
 const toImg = (px, py) => ({ x: (px - view.ox) / view.sx, y: (py - view.oy) / view.sx });
 const toScr = (x, y) => ({ x: view.ox + x * view.sx, y: view.oy + y * view.sx });
 function curLabels() { const f = S.frames[S.idx]; if (!f) return []; return S.labels[f.name] || (S.labels[f.name] = []); }
@@ -619,8 +642,10 @@ function draw() {
   fitCanvas(); const bm = S.bitmaps.get(S.idx); if (!bm) return;
   ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
   ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.imageSmoothingEnabled = view.sx < 2; // show real pixels when zoomed far in
   ctx.drawImage(bm, view.ox, view.oy, view.w * view.sx, view.h * view.sx);
   drawOverlay(ctx, view, S.idx, curLabels(), S.sel, S.review);
+  const zb = $('zoombadge'); zb.hidden = zoom.z === 1; zb.textContent = `×${zoom.z.toFixed(zoom.z < 3 ? 1 : 0)}  (0: 원래 크기)`;
 }
 // boxes (+ selection handles, review pins and the burned-in frame number) in the coordinate frame given by v
 function drawOverlay(g, v, idx, L, sel, review) {
@@ -686,9 +711,11 @@ function hitTest(x, y) {
   return null;
 }
 cv.addEventListener('contextmenu', e => e.preventDefault());
+cv.addEventListener('auxclick', e => { if (e.button === 1) e.preventDefault(); });
 cv.addEventListener('pointerdown', e => {
   if (!S.frames.length) return; cv.setPointerCapture(e.pointerId);
   const r = cv.getBoundingClientRect(); const p = toImg(e.clientX - r.left, e.clientY - r.top);
+  if (S.review && (e.button === 1 || (e.button === 0 && e.altKey))) { e.preventDefault(); drag = { type: 'pan', c0: { x: e.clientX, y: e.clientY }, pan0: { x: zoom.px, y: zoom.py }, moved: false }; cv.className = 'pan'; return; }
   if (S.review) {
     if (e.button !== 0) return;
     if (S.playing) { stopPlay(); return; }
@@ -698,6 +725,7 @@ cv.addEventListener('pointerdown', e => {
     $('noteedit').hidden = false; $('notetext').value = ''; $('notetext').focus();
     return;
   }
+  if (e.button === 1 || (e.button === 0 && e.altKey)) { e.preventDefault(); drag = { type: 'pan', c0: { x: e.clientX, y: e.clientY }, pan0: { x: zoom.px, y: zoom.py }, moved: false }; cv.className = 'pan'; return; }
   if (e.button === 2) { const h = hitTest(p.x, p.y); if (h) { pushHist(); curLabels().splice(h.j, 1); S.sel = -1; changed(); } return; }
   if (e.button !== 0) return;
   if (e.shiftKey) { drag = { type: 'draw', start: p, moved: false }; return; }
@@ -706,6 +734,7 @@ cv.addEventListener('pointerdown', e => {
   drag = { type: 'click', start: p, moved: false };
 });
 cv.addEventListener('pointermove', e => {
+  if (drag && drag.type === 'pan') { zoom.px = drag.pan0.x + e.clientX - drag.c0.x; zoom.py = drag.pan0.y + e.clientY - drag.c0.y; draw(); return; }
   const r = cv.getBoundingClientRect(); const p = toImg(e.clientX - r.left, e.clientY - r.top);
   drawMag(p.x, p.y);
   if (!drag) { const h = hitTest(p.x, p.y); cv.className = h ? (h.h === 'move' ? 'grab' : 'resize') : ''; return; }
@@ -719,6 +748,7 @@ cv.addEventListener('pointermove', e => {
 });
 cv.addEventListener('pointerup', async e => {
   if (!drag) return; const d = drag; drag = null;
+  if (d.type === 'pan') { cv.className = ''; return; }
   const r = cv.getBoundingClientRect(); const p = toImg(e.clientX - r.left, e.clientY - r.top);
   if (d.type === 'click' && !d.moved) { await clickAt(p.x, p.y); return; }
   if (d.type === 'draw') {
@@ -782,6 +812,8 @@ document.addEventListener('keydown', e => {
   else if ('123'.includes(k) && S.sel >= 0) { pushHist(); L[S.sel].c = COLORS[+k - 1]; L[S.sel].flag = false; changed(); }
   else if (k === 'q' && S.sel >= 0) { pushHist(); L[S.sel].k = L[S.sel].k === 'Tin' ? 'Rag' : 'Tin'; changed(); }
   else if (k === 'escape') { S.sel = -1; changed(); }
+  else if (k === '0') resetZoom();
+  else if (k === '+' || k === '=' || k === '-') { const r = cv.getBoundingClientRect(); zoomAt(k === '-' ? 0.8 : 1.25, r.width / 2, r.height / 2); }
   else if (k === 'a' && !e.ctrlKey) { pushHist(); autoLabelFrame(S.idx).then(b => { S.labels[S.frames[S.idx].name] = b; S.sel = -1; changed(); }); }
 });
 new ResizeObserver(() => draw()).observe($('stage'));
@@ -1187,7 +1219,7 @@ const saveNote2 = r => r === 'declined' ? '\n저장을 취소했습니다.' : r 
 function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 setMode('Tin'); fitCanvas();
 // test hook
-window.T3 = { S, segmentAt, hsvOf, showFrame, extract, voteColor, yoloTxt, TIN_HUE, PAD_HUE, startLabeling, setReview, startPlay, stopPlay, renderNotes, autoLabelFrame, runAutoLabel, readZip };
+window.T3 = { S, toScr, view: () => view, segmentAt, hsvOf, showFrame, extract, voteColor, yoloTxt, TIN_HUE, PAD_HUE, startLabeling, setReview, startPlay, stopPlay, renderNotes, autoLabelFrame, runAutoLabel, readZip };
 })();
 </script>
 </body>
