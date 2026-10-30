@@ -1,0 +1,9 @@
+# Task3 tin/rag YOLO11n (6 클래스) — Hailo 모델주 master(DFC 5.x) yolov11n.alls 와 같고 NMS 설정만 6 클래스 json 으로 바꿈.
+# (hailomz compile yolov11n --classes 6 이면 모델주 기본 alls 로도 같은 결과. 이 파일은 직접 DFC 를 쓸 때용.)
+# conv 번호(51/54, 62/65, 77/80)는 모델주가 yolo11n ONNX 를 파싱했을 때의 레이어 이름이다. 파싱 후 `hailo visualizer`/har 로 확인.
+normalization1 = normalization([0.0, 0.0, 0.0], [255.0, 255.0, 255.0])
+change_output_activation(conv54, sigmoid)
+change_output_activation(conv65, sigmoid)
+change_output_activation(conv80, sigmoid)
+nms_postprocess("yolov11n_task3_nms_config.json", meta_arch=yolov8, engine=cpu)
+allocator_param(width_splitter_defuse=disabled)
