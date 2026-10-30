@@ -78,6 +78,10 @@ class App:
         except Exception:
             pass   # 쓰는 중이면 직전 것을 쓴다
         st = dict(st)
+        if not st.get('state'):
+            # 학습 프로세스가 아직 status.json 을 쓰기 전 (torch 불러오는 중): 대기가 아니라 시작 중으로 알린다
+            st = {'state': 'running' if alive else 'error', 'phase': 0, 'phases': [], 'message': '학습 프로세스 시작 중',
+                  'error': None if alive else '학습 프로세스가 상태 파일을 쓰기 전에 끝났습니다. 로그를 확인하세요.'}
         st['run'] = run; st['run_dir'] = d; st['alive'] = alive
         if st.get('state') == 'running' and not alive:
             if self.stopped and run == self.run:
@@ -108,6 +112,8 @@ class App:
                 cmd += ['--video', vp]
             if fraction and 0 < fraction < 1:
                 cmd += ['--fraction', str(fraction)]
+            if self.log:
+                self.log.close()   # 이전 학습의 로그 파일을 닫는다 (윈도우에서 그 폴더를 지울 수 있게)
             self.log = open(os.path.join(d, 'log.txt'), 'wb')
             kw = {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP} if WIN else {'start_new_session': True}
             # 작업 폴더를 결과 폴더 위로 두면 yolo11n.pt 를 한 번만 내려받고 다음 학습에서 다시 쓴다
@@ -214,6 +220,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(body)))
             self.send_header('Cache-Control', 'no-store'); self.end_headers(); self.wfile.write(body); return
+        if u.path == '/favicon.ico':
+            self.send_response(204); self.end_headers(); return
         if u.path == '/api/ping':
             self.send_json({'ok': True, 'api': API_VERSION, 'env': self.app.env, 'busy': self.app.busy(), 'work': self.app.work}); return
         if u.path == '/api/status':

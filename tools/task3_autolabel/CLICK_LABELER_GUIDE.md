@@ -54,7 +54,8 @@
 - 처음 한 번은 `yolo11n.pt`(약 5 MB)를 내려받으므로 인터넷이 필요합니다. 같은 zip이나 영상을 다시 고르면 PC에 이미 있는 사본을 써서 바로 시작합니다.
 - 다른 파이썬을 쓰려면 `T3_PYTHON` 환경변수에 python.exe 경로를 넣고 bat을 실행하세요. 맥/리눅스는 `python trainer/task3_train_server.py`.
 - 서버는 이 PC의 브라우저(127.0.0.1)에서만 열리고, 다른 사이트의 요청은 받지 않습니다. 아티팩트 미리보기 창이나 파일로 연 페이지에서는 패널 6이 안내만 보여 줍니다.
-- Roboflow의 "Train Model" 버튼은 쓰지 않습니다. .pt를 받을 수 없어 hef로 바꿀 수 없기 때문입니다.
+- Roboflow의 "Train Model" 대신 이 패널을 씁니다. 여기서 학습하면 hef로 바꿀 .pt, ONNX, 보정 이미지가 바로 PC에 남습니다.
+- 점검 영상 단계가 실패해도(코덱 문제 등) 그 단계만 건너뛰고 ONNX와 번들은 끝까지 만듭니다.
 
 ## 5. 자동 탐지가 하는 일과 한계
 
@@ -106,7 +107,7 @@
 
 PC 학습 (패널 6, 브라우저는 GPU 학습을 못 하므로 로컬 서버를 함께 만든다):
 - trainer/task3_train_server.py: 파이썬 표준 라이브러리만 쓰는 HTTP 서버. 127.0.0.1:8765(사용 중이면 다음 포트)에만 열고 라벨러 HTML을 / 로 내준다. Host 헤더가 127.0.0.1/localhost:포트가 아니면 거부, POST는 X-T3 헤더와 같은 출처 Origin일 때만 받는다. API: /api/ping(파이썬·torch·CUDA·ultralytics 버전), /api/upload(원본 파일 바이트, 이름+크기로 캐시), /api/train, /api/status, /api/stop(프로세스 트리 종료), /api/file(결과 다운로드), /api/open(결과 폴더 열기).
-- trainer/task3_train_job.py: 학습 한 번을 별도 프로세스로 실행하고 status.json에 단계·에폭·배치·지표를 쓴다. 단계: zip 풀기와 클래스 이름 검사(드론 순서로 재매핑, 모르는 이름이면 중단) → Ultralytics YOLO11n 학습(COCO yolo11n.pt, imgsz 640, batch 8, 100 에폭, hsv_h 0.005, hsv_s 0.5, hsv_v 0.4, degrees 10, translate 0.1, scale 0.5, flipud/fliplr 0.5, mosaic 1, close_mosaic 10, cos_lr, seed 0) → valid/test 클래스별 P/R/mAP50/mAP50-95 → 선택한 영상의 점검 영상(conf 0.4, 왼쪽 아래 프레임 번호) → ONNX(opset 11, NMS 없음, 1x3x640x640, /model.23/cv2.x·cv3.x end node 확인, onnxruntime으로 .pt와 출력 대조) → 114 회색 letterbox 보정 이미지 1024장(부족하면 영상 프레임, 그래도 부족하면 뒤집은 학습 프레임) → ONNX + calib1024 + hailo/compile.sh(LF 줄바꿈) + REPORT.md 번들 zip.
+- trainer/task3_train_job.py: 학습 한 번을 별도 프로세스로 실행하고 status.json에 단계·에폭·배치·지표를 쓴다. 단계: zip 풀기와 클래스 이름 검사(드론 순서로 재매핑, 모르는 이름이면 중단) → Ultralytics YOLO11n 학습(COCO yolo11n.pt, imgsz 640, batch 8, 100 에폭, hsv_h 0.005, hsv_s 0.5, hsv_v 0.4, degrees 10, translate 0.1, scale 0.5, flipud/fliplr 0.5, mosaic 1, close_mosaic 10, cos_lr, seed 0) → valid/test 클래스별 P/R/mAP50/mAP50-95 → 선택한 영상의 점검 영상(conf 0.4, 왼쪽 아래 프레임 번호, 실패하면 이 단계만 건너뜀) → ONNX(opset 11, NMS 없음, 1x3x640x640, /model.23/cv2.x·cv3.x end node 확인, onnxruntime으로 .pt와 출력 대조) → 114 회색 letterbox 보정 이미지 1024장(부족하면 영상 프레임, 그래도 부족하면 뒤집은 학습 프레임) → ONNX + calib1024 + hailo/compile.sh(LF 줄바꿈) + REPORT.md 번들 zip.
 - 학습서버_시작.bat: 아나콘다/미니콘다 base를 찾아 활성화하고 KMP_DUPLICATE_LIB_OK=TRUE, PYTHONUTF8=1로 서버를 실행한다.
 - 페이지 패널 6: 서버 연결과 GPU 표시, Roboflow zip·점검 영상 선택, 에폭·배치, 업로드 진행률, 단계 목록, 에폭별 mAP 그래프, 남은 시간, 결과 표와 파일 링크, 로그.
 

@@ -207,7 +207,7 @@ code.cmd { display: block; font: 11px var(--mono); background: var(--bg); border
       <div id="trbody" hidden>
         <label class="file"><input type="file" id="trzip" accept=".zip,application/zip"><span>Roboflow zip 선택 (YOLOv11 형식)</span></label>
         <label class="file"><input type="file" id="trvid" accept="video/*"><span>점검용 원본 영상 (선택)</span></label>
-        <div class="kv"><span>데이터</span><b id="trzipname">-</b><span>점검 영상</span><b id="trvidname">없음 (점검 영상은 건너뜀)</b></div>
+        <div class="kv"><span>데이터</span><b id="trzipname">-</b><span>점검 영상</span><b id="trvidname">없음 (고르지 않으면 점검 영상은 건너뜀)</b></div>
         <div class="row"><label>에폭</label><input type="number" id="trepochs" value="100" min="1" max="1000" style="width:72px"><label>배치</label><input type="number" id="trbatch" value="8" min="1" max="128" style="width:60px"></div>
         <div class="row"><button class="primary" id="trstart" style="flex:1">학습 시작</button><button class="small" id="trstop" hidden>중지</button></div>
         <div class="prog"><i id="trprog"></i></div>
@@ -1255,7 +1255,7 @@ const saveNote2 = r => r === 'declined' ? '\n저장을 취소했습니다.' : r 
 
 function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 setMode('Tin'); fitCanvas();
-// test hook
+
 // ---------- PC training: talks to trainer/task3_train_server.py on this PC ----------
 // The browser cannot run GPU training, so a small local server (started with 학습서버_시작.bat) serves this page at
 // http://127.0.0.1:8765 and runs trainer/task3_train_job.py: Roboflow zip -> YOLO11n -> eval -> ONNX -> calib1024 -> Hailo bundle.
@@ -1289,7 +1289,7 @@ async function trInit() {
   }
 }
 $('trzip').onchange = e => { const f = e.target.files[0]; if (!f) return; TR.zip = f; $('trzipname').textContent = `${f.name} (${trSize(f.size)})`; };
-$('trvid').onchange = e => { const f = e.target.files[0]; TR.vid = f || null; $('trvidname').textContent = f ? `${f.name} (${trSize(f.size)})` : '없음 (점검 영상은 건너뜀)'; };
+$('trvid').onchange = e => { const f = e.target.files[0]; TR.vid = f || null; $('trvidname').textContent = f ? `${f.name} (${trSize(f.size)})` : '없음 (고르지 않으면 점검 영상은 건너뜀)'; };
 async function trUpload(file, label) {
   const q = `name=${encodeURIComponent(file.name)}&size=${file.size}`;
   const has = await trApi('/api/has?' + q);
@@ -1326,10 +1326,10 @@ async function trPoll() {
   try { s = await trApi('/api/status'); }
   catch (e) { $('trmsg').className = 'msg err'; $('trmsg').textContent = '서버 연결이 끊겼습니다: ' + e.message; TR.timer = setTimeout(trPoll, 5000); return; }
   trRender(s);
-  if (s.state === 'running') TR.timer = setTimeout(trPoll, 1500);
+  if (!['idle', 'done', 'error', 'stopped'].includes(s.state)) TR.timer = setTimeout(trPoll, 1500);   // keep polling while running or starting
 }
 function trRender(s) {
-  const running = s.state === 'running', m = $('trmsg');
+  const running = !['idle', 'done', 'error', 'stopped'].includes(s.state), m = $('trmsg');
   $('trstart').disabled = running; $('trstop').hidden = !running;
   if (s.state === 'idle') { m.className = 'msg'; m.textContent = 'zip을 고르고 "학습 시작"을 누르세요. 결과는 PC의 train_runs 폴더에 쌓입니다.'; return; }
   const ph = s.phases || [], i = s.phase || 0;
@@ -1367,8 +1367,10 @@ function trChart(h) {
   for (const [key, c2] of [['mAP50', col('--accent')], ['mAP50_95', col('--warn')]]) {
     g.beginPath(); h.forEach((r, k) => { k ? g.lineTo(X(k), Y(r[key])) : g.moveTo(X(k), Y(r[key])); }); g.strokeStyle = c2; g.lineWidth = 1.6; g.stroke();
   }
-  const last = h[h.length - 1]; g.font = '10px ' + MONO; g.fillStyle = col('--muted');
-  g.fillText(`에폭 ${last.epoch} · mAP50 ${(last.mAP50 || 0).toFixed(3)} (초록) · mAP50-95 ${(last.mAP50_95 || 0).toFixed(3)} (주황)`, 6, H - 4);
+  const last = h[h.length - 1]; g.font = '10px ' + MONO; let x = 6;
+  for (const [t, c2] of [[`에폭 ${last.epoch}`, col('--muted')], [`mAP50 ${(last.mAP50 || 0).toFixed(3)}`, col('--accent')], [`mAP50-95 ${(last.mAP50_95 || 0).toFixed(3)}`, col('--warn')]]) {
+    g.fillStyle = c2; g.fillText(t, x, H - 4); x += g.measureText(t).width + 10;   // legend in the line colours
+  }
 }
 function trResult(s) {
   const el = $('trresult'), r = s.result || {}; let html = '';
@@ -1391,6 +1393,7 @@ function trResult(s) {
 }
 trInit();
 
+// test hook
 window.T3 = { S, TR, trPoll, toScr, view: () => view, segmentAt, hsvOf, showFrame, extract, voteColor, yoloTxt, TIN_HUE, PAD_HUE, startLabeling, setReview, startPlay, stopPlay, renderNotes, autoLabelFrame, runAutoLabel, readZip };
 })();
 </script>

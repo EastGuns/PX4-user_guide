@@ -10,7 +10,7 @@
 레시피는 tools/task3_train/train.py (PR #2) 와 같다: COCO 사전학습 yolo11n.pt, imgsz 640, hsv_h 0.005 (색 = 클래스),
 flipud/fliplr 0.5, 100 에폭, batch 8. 클래스 순서는 드론의 tin_detective.py NAMES 와 같아야 한다.
 """
-import argparse, json, os, random, re, shutil, sys, time, traceback, zipfile
+import argparse, json, os, random, re, shutil, subprocess, sys, time, traceback, zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HAILO_DIR = os.path.join(HERE, 'hailo')
@@ -160,6 +160,7 @@ def count_labels(imgs):
 
 
 def remap_labels(imgs, mapping):
+    dropped = 0
     for p in imgs:
         lp = label_of(p)
         if not os.path.exists(lp):
@@ -168,10 +169,16 @@ def remap_labels(imgs, mapping):
         with open(lp, encoding='utf-8', errors='replace') as f:
             for line in f:
                 t = line.split()
-                if t:
-                    t[0] = str(mapping[int(float(t[0]))]); rows.append(' '.join(t))
+                if not t:
+                    continue
+                try:
+                    t[0] = str(mapping[int(float(t[0]))])
+                except (ValueError, KeyError):
+                    dropped += 1; continue   # 숫자가 아니거나 클래스 범위를 벗어난 줄은 버린다
+                rows.append(' '.join(t))
         with open(lp, 'w', encoding='utf-8') as f:
             f.write('\n'.join(rows) + ('\n' if rows else ''))
+    return dropped
 
 
 def prepare(a, st):
@@ -206,8 +213,10 @@ def prepare(a, st):
         raise RuntimeError('학습/검증 이미지를 찾지 못했습니다. zip 안에 train/images, valid/images 폴더가 있어야 합니다.')
     remapped = any(k != v for k, v in mapping.items())
     if remapped:
-        remap_labels(train + val + test, mapping)
+        dropped = remap_labels(train + val + test, mapping)
         warn.append(f'zip 의 클래스 순서 {names} 를 드론 순서로 바꿔 라벨 번호를 고쳐 씀')
+        if dropped:
+            warn.append(f'읽지 못한 라벨 줄 {dropped}개는 버림')
     lists = {}
     for k, imgs in (('train', train), ('val', val), ('test', test)):
         if imgs:
@@ -227,7 +236,7 @@ def prepare(a, st):
     for k, c in counts.items():
         if c['bad_rows']:
             warn.append(f'{k}: 읽지 못한 라벨 줄 {c["bad_rows"]}개는 무시')
-    st.d['dataset'] = {'file': os.path.basename(a.dataset), 'tag': tag, 'roboflow': {k: rf.get(k) for k in ('workspace', 'project', 'version') if rf.get(k) is not None},
+    st.d['dataset'] = {'file': re.sub(r'^\d+_', '', os.path.basename(a.dataset)), 'tag': tag, 'roboflow': {k: rf.get(k) for k in ('workspace', 'project', 'version') if rf.get(k) is not None},
                        'names_in_zip': names, 'remapped': remapped, 'split': how, 'counts': counts, 'warnings': warn}
     note = ' / '.join(f'{k} {c["images"]}장' for k, c in counts.items())
     st.done(0, note)
@@ -266,7 +275,7 @@ def train(a, st, data_yaml, device):
         st.save(throttle=1.0)
 
     def on_fit_epoch_end(tr):
-        # ultralytics 8.4 calls this once more from final_eval (best.pt) after the last epoch; that is not a new epoch
+        # ultralytics 8.4 는 마지막 에폭 뒤 final_eval(best.pt) 에서 이 콜백을 한 번 더 부른다. 새 에폭이 아니라서 건너뛴다
         if tr.epoch + 1 > tr.epochs or (st.d['history'] and st.d['history'][-1]['epoch'] >= tr.epoch + 1):
             return
         m = tr.metrics or {}
@@ -365,7 +374,8 @@ def review_video(a, st, best, dst):
             st.d['sub'] = [i, total]; st.d['message'] = f'점검 영상 {i}/{total or "?"} 프레임'; st.save(throttle=1.0)
     vw.release(); cap.release()
     ff = shutil.which('ffmpeg')
-    if ff and os.system(f'"{ff}" -y -loglevel error -i "{raw}" -c:v libx264 -pix_fmt yuv420p -crf 23 -movflags +faststart "{dst}"') == 0:
+    if ff and subprocess.run([ff, '-y', '-loglevel', 'error', '-i', raw, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '23',
+                              '-movflags', '+faststart', dst]).returncode == 0:
         os.remove(raw)
     else:
         os.replace(raw, dst)   # ffmpeg 가 없으면 mp4v 그대로 (VLC·윈도우 미디어 플레이어로 재생)
@@ -432,7 +442,10 @@ def make_calib(a, st, train_imgs, dst, n=1024):
     k = 0
     def put(img):
         nonlocal k
-        cv2.imwrite(os.path.join(dst, f'calib_{k:04d}.jpg'), letterbox(img), [cv2.IMWRITE_JPEG_QUALITY, 95]); k += 1
+        p = os.path.join(dst, f'calib_{k:04d}.jpg')
+        if not cv2.imwrite(p, letterbox(img), [cv2.IMWRITE_JPEG_QUALITY, 95]):
+            raise RuntimeError(f'보정 이미지를 쓰지 못했습니다: {p}')
+        k += 1
         if k % 64 == 0:
             st.d['sub'] = [k, n]; st.save(throttle=1.0)
     for f in files[:n]:
@@ -510,7 +523,7 @@ def write_report(a, st, tag, files):
     h = st.d['history']; t0 = st.d.get('train_started') or st.d['started']
     took = (h[-1]['t'] - t0) / 60 if h else 0
     L.append(f'- 학습: {a.weights} 에서 {len(h)} 에폭, batch {a.batch}, imgsz 640, 장치 {st.d["device"]}, 학습 시간 {took:.1f}분')
-    L.append('- 레시피: hsv_h 0.005 (색 = 클래스), hsv_s 0.5, hsv_v 0.4, degrees 10, flipud/fliplr 0.5, mosaic 1.0 (마지막 10 에폭 끔)')
+    L.append(f'- 레시피: hsv_h 0.005 (색 = 클래스), hsv_s 0.5, hsv_v 0.4, degrees 10, flipud/fliplr 0.5, mosaic 1.0 (마지막 {min(10, a.epochs)} 에폭 끔)')
     for k, v in ev.items():
         L += ['', f'## {k} (이미지 {v["images"]}장, 박스 {v["boxes"]}개)', '', '| 클래스 | 박스 | P | R | mAP50 | mAP50-95 |', '|---|---|---|---|---|---|']
         for r in v['rows']:
@@ -551,8 +564,12 @@ def main():
         evaluate(a, st, best, data_yaml, lists, device)
         files = {'pt': (os.path.basename(pt), '학습된 가중치 (best)')}
         if a.video:
-            rv = review_video(a, st, best, os.path.join(a.out, f'review_{tag}.mp4'))
-            files['review'] = (os.path.basename(rv), '점검 영상 (박스 + 왼쪽 아래 프레임 번호, 원본 속도, conf 0.4)')
+            try:
+                rv = review_video(a, st, best, os.path.join(a.out, f'review_{tag}.mp4'))
+                files['review'] = (os.path.basename(rv), '점검 영상 (박스 + 왼쪽 아래 프레임 번호, 원본 속도, conf 0.4)')
+            except Exception as e:   # 점검 영상은 덤이라 실패해도 ONNX·번들은 계속 만든다
+                traceback.print_exc()
+                st.done(3, f'건너뜀: {e}', state='skip')
         else:
             st.done(3, '영상 없음', state='skip')
         onnx_path = export_onnx(a, st, best, os.path.join(a.out, f'task3_yolo11n_{tag}.onnx'))
