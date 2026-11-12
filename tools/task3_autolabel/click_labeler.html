@@ -45,6 +45,25 @@ main { flex: 1; display: grid; grid-template-columns: 1fr 340px; min-height: 0; 
 #hint { font-size: 12px; color: #c3cad0; background: rgba(0,0,0,.55); padding: 5px 10px; line-height: 1.5; }
 #hint b { color: #fff; font-weight: 600; }
 #empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #8d98a0; font-size: 14px; text-align: center; padding: 24px; pointer-events: none; }
+#cutview { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--stage); }
+#pv { flex: 1; min-height: 0; width: 100%; object-fit: contain; background: #000; cursor: pointer; }
+#cutbar { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; background: rgba(0,0,0,.55); color: #e8ecef; }
+#tl { width: 100%; height: 44px; display: block; cursor: pointer; touch-action: none; }
+.cutrow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+#pvtime { font: 12px var(--mono); color: #e8ecef; margin-left: 4px; font-variant-numeric: tabular-nums; }
+#pvmsg { font-size: 12px; color: #c3cad0; }
+button.mark { font-weight: 700; padding: 6px 14px; }
+#pvin { box-shadow: inset 4px 0 0 #4ade80; }
+#pvout { box-shadow: inset -4px 0 0 #f0a04b; }
+.cutkeys { font-size: 11px; color: #9aa4ab; line-height: 1.5; }
+.cutkeys b { color: #e8ecef; font-weight: 600; }
+.seghead { font-size: 12px; margin-right: auto; }
+#segs { display: flex; flex-direction: column; gap: 4px; max-height: 200px; overflow-y: auto; }
+.sg { display: grid; grid-template-columns: 20px 62px 8px 62px 1fr auto auto; gap: 4px; align-items: center; font-size: 12px; }
+.sg > b { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: #5fb39b; color: #0f1a16; font-size: 11px; }
+.sg input[type=number] { width: 62px; padding: 2px 4px; }
+.sg .n2 { color: var(--muted); font-size: 11px; line-height: 1.2; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sg .n2 b { color: var(--fg); font-weight: 600; }
 aside { background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; padding: 10px 12px 24px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
 .card h2 { font-size: 13px; margin: 0; display: flex; align-items: center; gap: 8px; }
@@ -108,6 +127,7 @@ details summary { cursor: pointer; font-size: 12px; color: var(--muted); }
 code.cmd { display: block; font: 11px var(--mono); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 7px; word-break: break-all; user-select: all; }
 @media (max-width: 820px) {
   main { grid-template-columns: 1fr; grid-template-rows: 55vh 1fr; }
+  .cutkeys { display: none; }
   aside { border-left: 0; border-top: 1px solid var(--line); }
 }
 @media (prefers-reduced-motion: reduce) { .prog i { transition: none; } }
@@ -125,6 +145,27 @@ code.cmd { display: block; font: 11px var(--mono); background: var(--bg); border
     <div id="zoombadge" hidden></div>
     <canvas id="cv"></canvas>
     <div id="empty">오른쪽 1번에서 영상이나 zip(이미지 모음)을 불러오면<br>여기에 프레임이 나타납니다.<br><br>"자동 라벨링"으로 1차 패스를 돌린 뒤 틀린 것만 고치거나,<br>캔 위를 클릭하면 Tin 박스, 패드 위를 클릭하면 Rag 박스가 생기고<br>색(Red/Green/Blue)은 HSV로 자동 판정됩니다.</div>
+    <div id="cutview" hidden>
+      <video id="pv" muted playsinline preload="auto"></video>
+      <div id="cutbar">
+        <canvas id="tl" title="클릭하거나 끌어서 이동"></canvas>
+        <div class="cutrow">
+          <button class="small" id="pvb1s" title="1초 뒤로 (Shift+←)">−1초</button>
+          <button class="small" id="pvbf" title="1프레임 뒤로 (←)">◀ 1프레임</button>
+          <button class="primary" id="pvplay" title="재생/정지 (Space)">▶ 재생</button>
+          <button class="small" id="pvff" title="1프레임 앞으로 (→)">1프레임 ▶</button>
+          <button class="small" id="pvf1s" title="1초 앞으로 (Shift+→)">+1초</button>
+          <select id="pvrate" title="재생 속도"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select>
+          <span id="pvtime">0:00.00 / 0:00.00</span>
+        </div>
+        <div class="cutrow">
+          <button class="mark" id="pvin" title="I 키">[ 여기서부터</button>
+          <button class="mark" id="pvout" title="O 키">여기까지 ]</button>
+          <span id="pvmsg"></span>
+        </div>
+        <div class="cutkeys"><b>Space</b> 재생/정지 · <b>←</b>/<b>→</b> 1프레임 · <b>Shift+←</b>/<b>→</b> 1초 · <b>I</b> 여기서부터 · <b>O</b> 여기까지 · 타임라인을 클릭하거나 끌어서 이동 · 영상 클릭으로 재생/정지</div>
+      </div>
+    </div>
     <div id="hint"><b>클릭</b> 현재 모드로 자동 박스 · <b>Shift+드래그</b> 수동 박스 · <b>드래그</b> 박스 이동/모서리 조절 · <b>우클릭</b> 삭제 · <b>T</b>/<b>R</b> 모드 · <b>←</b>/<b>→</b> 프레임 · <b>1 2 3</b> 선택 박스 색 Red/Green/Blue · <b>Q</b> Tin↔Rag · <b>C</b> 이전 프레임 박스 가져오기(재탐지) · <b>Ctrl+Z</b> 되돌리기 · <b>A</b> 이 프레임 자동 라벨링 · <b>휠</b> 확대/축소 · <b>휠 누른 채 드래그</b> 또는 <b>Alt+드래그</b> 이동 · <b>0</b> 원래 크기</div>
   </section>
   <aside>
@@ -143,7 +184,8 @@ code.cmd { display: block; font: 11px var(--mono); background: var(--bg); border
         <select id="cutmode"><option value="interval">간격(초)마다</option><option value="fps">초당 N장(fps)</option><option value="count">총 N장</option></select>
         <input type="number" id="cutval" value="0.5" min="0.01" step="0.1">
       </div>
-      <div class="row"><label>시작(초)</label><input type="number" id="tstart" value="0" min="0" step="0.1"><label>끝(초)</label><input type="number" id="tend" value="0" min="0" step="0.1"></div>
+      <div class="row"><b class="seghead">자를 구간</b><button class="small" id="bcutview" hidden>영상 보며 구간 정하기</button><button class="small" id="segclear" hidden>모두 지우기</button></div>
+      <div id="segs"></div>
       <div class="kv"><span>예상 장수</span><b id="ncount">-</b><span>JPEG 품질</span><b><input type="number" id="jpgq" value="92" min="50" max="100" step="1" style="width:64px"></b></div>
       <button class="primary" id="bextract" disabled>프레임 추출 시작</button>
       <div class="prog"><i id="extprog"></i></div>
@@ -250,6 +292,8 @@ const S = {
   notes: [],            // {i, x, y, text}
   review: false, playing: false, timer: 0, pendingPin: null,
   hist: {},             // name -> [json]
+  segs: [],             // [[start, end], ...] seconds to cut, sorted and not overlapping; empty = the whole video
+  mark: { s: null, e: null }, vfps: 0,   // pending 여기서부터/여기까지 marks; video frame rate (0 = unknown)
   bitmaps: new Map(), hsv: new Map(),
   storeKey: null, rfAbort: false,
 };
@@ -286,9 +330,11 @@ $('fvideo').addEventListener('change', async e => {
   S.storeKey = 't3click:' + f.name + ':' + f.size;
   $('srcinfo').hidden = false;
   $('srcinfo').innerHTML = `<span>파일</span><b>${esc(f.name)}</b><span>길이</span><b>${video.duration.toFixed(2)} 초</b><span>해상도</span><b>${video.videoWidth} × ${video.videoHeight}</b><span>크기</span><b>${(f.size / 1048576).toFixed(1)} MB</b>`;
-  $('tend').value = video.duration.toFixed(2); $('tstart').value = 0;
+  pv.src = video.src; S.segs = normSegs(lsGet(S.storeKey + ':segs') || []); S.mark = { s: null, e: null }; S.vfps = 0;
+  if (/\.(mp4|m4v|mov)$/i.test(f.name)) mp4Fps(f).then(fps => { if (fps > 0 && fps < 1000) { S.vfps = fps; pvTick(); } }).catch(() => {});
   $('bextract').disabled = false; $('extmsg').textContent = '';
-  setStep(2); updateCount();
+  setStep(2); setCutView(true); refreshCut();
+  cutMsg(S.segs.length ? `지난번에 찍은 구간 ${S.segs.length}개를 불러왔습니다. 오른쪽 목록에서 고치거나 지울 수 있습니다.` : '재생하거나 타임라인을 끌어서, 쓸 구간의 시작에서 "여기서부터", 끝에서 "여기까지"를 누르세요.');
   const saved = lsGet(S.storeKey);
   if (saved && saved.names && saved.names.length) {
     $('restore').hidden = false;
@@ -373,32 +419,51 @@ function resetAll() {
   S.frames = []; S.labels = {}; S.uploaded = {}; S.notes = []; S.idx = 0; S.sel = -1; S.hist = {}; S.bitmaps.clear(); S.hsv.clear(); zoom.z = 1; zoom.px = 0; zoom.py = 0;
   if (S.review) setReview(false); stopPlay(); $('notes').innerHTML = ''; $('notemsg').textContent = '';
   $('restore').hidden = true; $('boxes').innerHTML = ''; $('zipmsg').textContent = ''; $('rfmsg').textContent = '';
+  S.segs = []; S.mark = { s: null, e: null }; S.vfps = 0; pv.pause(); setCutView(false); renderSegs(); cutPlan = []; updateCount();
 }
 
 // ---------- cutting ----------
-function cutCfg() { return { mode: $('cutmode').value, val: +$('cutval').value, start: +$('tstart').value, end: +$('tend').value, q: +$('jpgq').value }; }
-function applyCfg(c) { if (!c) return; $('cutmode').value = c.mode; $('cutval').value = c.val; $('tstart').value = c.start; $('tend').value = c.end; if (c.q) $('jpgq').value = c.q; updateCount(); }
+function cutCfg() { return { mode: $('cutmode').value, val: +$('cutval').value, segs: S.segs.map(g => [...g]), q: +$('jpgq').value }; }
+function applyCfg(c) {
+  if (!c) return; $('cutmode').value = c.mode; $('cutval').value = c.val; if (c.q) $('jpgq').value = c.q;
+  // saves made before segments kept one start/end pair
+  S.segs = normSegs(c.segs || (c.start > 0 || (c.end && c.end < S.src.duration - 0.01) ? [[c.start, c.end || S.src.duration]] : []));
+  refreshCut();
+}
+function segsOrAll() { return S.segs.length ? S.segs : [[0, S.src.duration]]; }
+function segTotal() { return S.src && S.src.kind === 'video' ? segsOrAll().reduce((a, g) => a + g[1] - g[0], 0) : 0; }
 function plan() {
   if (!S.src || S.src.kind !== 'video') return [];
-  const c = cutCfg(); const dur = S.src.duration;
-  const t0 = clamp(c.start, 0, dur), t1 = clamp(c.end || dur, t0, dur);
-  let step;
-  if (c.mode === 'interval') step = Math.max(0.01, c.val);
-  else if (c.mode === 'fps') step = 1 / Math.max(0.01, c.val);
-  else step = (t1 - t0) / Math.max(1, Math.round(c.val));
-  const ts = [];
-  if (c.mode === 'count') { const n = Math.max(1, Math.round(c.val)); for (let i = 0; i < n; i++) ts.push(t0 + (i + 0.5) * step); }
-  else for (let t = t0; t <= t1 + 1e-6 && ts.length < 5000; t += step) ts.push(t);
+  const c = cutCfg(), dur = S.src.duration, segs = segsOrAll(), ts = [];
+  if (c.mode === 'count') {
+    // N frames spread evenly over the segments laid end to end
+    const n = Math.max(1, Math.round(c.val)), step = segTotal() / n;
+    for (let i = 0; i < n; i++) {
+      let u = (i + 0.5) * step;
+      for (const [s, e] of segs) { if (u <= e - s + 1e-9) { ts.push(s + u); break; } u -= e - s; }
+    }
+  } else {
+    const step = c.mode === 'interval' ? Math.max(0.01, c.val) : 1 / Math.max(0.01, c.val);
+    for (const [s, e] of segs) for (let t = s; t <= e + 1e-6 && ts.length < 5000; t += step) ts.push(t);
+  }
   return ts.map(t => Math.min(t, Math.max(0, dur - 0.001)));
 }
-function updateCount() { const n = plan().length; $('ncount').textContent = n ? n + ' 장' + (n > 1500 ? ' (너무 많음: 1500장 이하 권장)' : '') : '-'; }
-['cutmode', 'cutval', 'tstart', 'tend'].forEach(id => $(id).addEventListener('input', updateCount));
-$('cutmode').addEventListener('change', () => { const m = $('cutmode').value; $('cutval').value = m === 'interval' ? 0.5 : m === 'fps' ? 2 : 100; $('cutval').step = m === 'count' ? 1 : 0.1; updateCount(); });
+let cutPlan = [];
+function updateCount() { const n = cutPlan.length; $('ncount').textContent = n ? n + ' 장' + (n > 1500 ? ' (너무 많음: 1500장 이하 권장)' : '') : '-'; }
+function refreshCut() { cutPlan = plan(); updateCount(); renderSegs(); drawTL(); }
+['cutmode', 'cutval'].forEach(id => $(id).addEventListener('input', refreshCut));
+$('cutmode').addEventListener('change', () => { const m = $('cutmode').value; $('cutval').value = m === 'interval' ? 0.5 : m === 'fps' ? 2 : 100; $('cutval').step = m === 'count' ? 1 : 0.1; refreshCut(); });
 
 $('bextract').addEventListener('click', async () => { await extract(); startLabeling(); });
 
 async function extract() {
   const ts = plan(); if (!ts.length) return;
+  if (S.frames.length) {
+    // the new frames reuse the names video_0001.jpg..., so labels made on the old frames would land on the wrong images
+    if (Object.values(S.labels).some(a => a.length) && !confirm('다시 자르면 지금 프레임이 새 프레임으로 바뀌고 지금 라벨은 지워집니다.\n필요하면 먼저 4번에서 zip으로 저장하세요. 계속할까요?')) return;
+    S.labels = {}; S.uploaded = {}; S.notes = []; S.hist = {}; S.idx = 0; S.sel = -1; renderNotes();
+  }
+  pv.pause();
   $('bextract').disabled = true; S.frames = []; S.bitmaps.clear(); S.hsv.clear();
   const W = S.src.w, H = S.src.h;
   const oc = document.createElement('canvas'); oc.width = W; oc.height = H; const octx = oc.getContext('2d', { willReadFrequently: false });
@@ -434,10 +499,171 @@ function seekTo(t) {
   });
 }
 
+// ---------- cut view: watch the video and mark the segments to cut ----------
+// The preview is its own <video> (same file), so scrubbing it never disturbs the hidden element extract() seeks.
+const pv = $('pv'), tl = $('tl');
+const fmtT = t => { const cs = Math.round(Math.max(0, t || 0) * 100), m = Math.floor(cs / 6000); return `${m}:${((cs - m * 6000) / 100).toFixed(2).padStart(5, '0')}`; };
+const r2 = t => Math.round(t * 100) / 100;
+function cutMsg(t) { $('pvmsg').textContent = t; }
+function normSegs(list) {
+  const d = S.src ? S.src.duration : 0, out = [];
+  const gs = (list || []).map(g => [clamp(+g[0] || 0, 0, d), clamp(+g[1] || 0, 0, d)]).map(g => g[0] <= g[1] ? g : [g[1], g[0]])
+    .filter(g => g[1] - g[0] >= 0.05).sort((a, b) => a[0] - b[0]);
+  for (const g of gs) { const last = out[out.length - 1]; if (last && g[0] <= last[1]) last[1] = Math.max(last[1], g[1]); else out.push(g); }   // overlaps are joined
+  return out;
+}
+function segsChanged() { S.segs = normSegs(S.segs); if (S.storeKey) lsSet(S.storeKey + ':segs', S.segs); refreshCut(); }
+function setCutView(on) {
+  const isVid = !!(S.src && S.src.kind === 'video');
+  on = on && isVid;
+  $('cutview').hidden = !on;
+  if (!on) pv.pause();
+  const b = $('bcutview');
+  b.hidden = !isVid || (on && !S.frames.length);
+  b.textContent = on ? '라벨링 화면으로' : '영상 보며 구간 정하기';
+  if (on) requestAnimationFrame(pvTick); else if (S.frames.length) draw();
+}
+$('bcutview').onclick = () => setCutView($('cutview').hidden);
+function renderSegs() {
+  const el = $('segs'); el.innerHTML = ''; $('segclear').hidden = !S.segs.length;
+  if (!S.src || S.src.kind !== 'video') return;
+  if (!S.segs.length) {
+    el.innerHTML = `<div class="msg">구간을 찍지 않으면 영상 전체(0 ~ ${S.src.duration.toFixed(2)}초)를 자릅니다. 왼쪽 영상에서 쓸 부분의 시작에 "여기서부터", 끝에 "여기까지"를 누르세요. 여러 구간을 찍을 수 있습니다.</div>`;
+    return;
+  }
+  S.segs.forEach((g, i) => {
+    const n = cutPlan.filter(t => t >= g[0] - 1e-6 && t <= g[1] + 1e-6).length;
+    const d = document.createElement('div'); d.className = 'sg';
+    d.innerHTML = `<b>${i + 1}</b><input type="number" min="0" step="0.01" value="${g[0].toFixed(2)}" title="시작(초) ${fmtT(g[0])}"><span>~</span><input type="number" min="0" step="0.01" value="${g[1].toFixed(2)}" title="끝(초) ${fmtT(g[1])}"><span class="n2"><b>${n}장</b><br>${(g[1] - g[0]).toFixed(1)}초</span><button class="small" title="이 구간의 시작으로 이동">▶</button><button class="small" title="이 구간 지우기">×</button>`;
+    const [a, b] = d.querySelectorAll('input'), [go, del] = d.querySelectorAll('button');
+    a.onchange = b.onchange = () => { S.segs[i] = [+a.value, +b.value]; segsChanged(); };
+    go.onclick = () => { setCutView(true); pv.pause(); pv.currentTime = g[0]; };
+    del.onclick = () => { S.segs.splice(i, 1); segsChanged(); };
+    el.appendChild(d);
+  });
+}
+$('segclear').onclick = () => { S.segs = []; S.mark = { s: null, e: null }; segsChanged(); cutMsg('구간을 모두 지웠습니다. 지금은 영상 전체를 자릅니다.'); };
+
+// 여기서부터 / 여기까지: either order works; the newest press wins when the two marks contradict
+function markIn() {
+  const t = r2(pv.currentTime || 0);
+  if (S.mark.e != null && S.mark.e - t >= 0.05) { addSeg(t, S.mark.e); return; }
+  S.mark = { s: t, e: null }; cutMsg(`시작 ${fmtT(t)} · 이제 끝 지점에서 "여기까지"(O)를 누르세요.`); drawTL();
+}
+function markOut() {
+  const t = r2(pv.currentTime || 0);
+  if (S.mark.s != null && t - S.mark.s >= 0.05) { addSeg(S.mark.s, t); return; }
+  S.mark = { s: null, e: t }; cutMsg(`끝 ${fmtT(t)} · 이제 시작 지점에서 "여기서부터"(I)를 누르세요.`); drawTL();
+}
+function addSeg(s, e) {
+  const before = S.segs.length; S.segs.push([s, e]); S.mark = { s: null, e: null }; segsChanged();
+  cutMsg(`구간 추가: ${fmtT(s)} ~ ${fmtT(e)} (${(e - s).toFixed(1)}초)` + (S.segs.length <= before ? ' · 겹치는 구간과 합쳤습니다' : '') + '. 다음 구간을 더 찍거나 오른쪽에서 "프레임 추출 시작".');
+}
+
+function drawTL() {
+  if ($('cutview').hidden || !S.src || S.src.kind !== 'video') return;
+  const r = tl.getBoundingClientRect(), dpr = devicePixelRatio || 1; if (!r.width) return;
+  if (tl.width !== Math.round(r.width * dpr) || tl.height !== Math.round(r.height * dpr)) { tl.width = Math.round(r.width * dpr); tl.height = Math.round(r.height * dpr); }
+  const g = tl.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, r.width, r.height);
+  const d = S.src.duration || 1, L = 8, W = r.width - 16, X = t => L + W * clamp(t / d, 0, 1), y0 = 10, y1 = 28;
+  g.fillStyle = 'rgba(255,255,255,.14)'; g.fillRect(L, y0, W, y1 - y0);
+  g.fillStyle = 'rgba(95,179,155,.6)'; for (const [s, e] of S.segs) g.fillRect(X(s), y0, Math.max(2, X(e) - X(s)), y1 - y0);
+  g.fillStyle = 'rgba(255,255,255,.75)'; for (const t of cutPlan) g.fillRect(Math.round(X(t)), y1 - 6, 1, 6);   // where frames will be cut
+  const flag = (t, col, dir) => { const x = X(t); g.fillStyle = col; g.fillRect(x - 1, y0 - 6, 2, y1 - y0 + 10); g.beginPath(); g.moveTo(x, y0 - 6); g.lineTo(x + 9 * dir, y0 - 2); g.lineTo(x, y0 + 2); g.fill(); };
+  if (S.mark.s != null) flag(S.mark.s, '#4ade80', 1);
+  if (S.mark.e != null) flag(S.mark.e, '#f0a04b', -1);
+  const x = X(pv.currentTime || 0); g.fillStyle = '#ffffff'; g.fillRect(x - 1, 3, 2, y1 - 1); g.beginPath(); g.arc(x, 5, 4, 0, Math.PI * 2); g.fill();
+  g.font = '10px ' + MONO; g.fillStyle = '#9aa4ab'; g.textBaseline = 'alphabetic';
+  const te = fmtT(d); g.fillText('0:00', L, r.height - 3); g.fillText(te, L + W - g.measureText(te).width, r.height - 3);
+}
+let pvRaf = 0;
+function pvTick() {
+  if ($('cutview').hidden) return;
+  const f = S.vfps, t = pv.currentTime || 0;
+  $('pvtime').textContent = `${fmtT(t)} / ${fmtT(S.src && S.src.duration)}` + (f ? ` · 프레임 ${Math.floor(t * f + 1e-3)} (${Math.round(f * 100) / 100}fps)` : '');
+  $('pvplay').textContent = pv.paused ? '▶ 재생' : '⏸ 정지';
+  drawTL();
+}
+function pvLoop() { pvTick(); if (!pv.paused) pvRaf = requestAnimationFrame(pvLoop); }
+pv.addEventListener('play', () => { cancelAnimationFrame(pvRaf); pvLoop(); measureFps(); });
+['pause', 'seeked', 'loadedmetadata', 'ended'].forEach(ev => pv.addEventListener(ev, pvTick));
+function pvToggle() { if (pv.paused) { if (pv.ended) pv.currentTime = 0; pv.play().catch(() => {}); } else pv.pause(); }
+function pvStep(dt) { pv.pause(); pv.currentTime = clamp((pv.currentTime || 0) + dt, 0, Math.max(0, S.src.duration - 0.001)); pvTick(); }
+function pvFrame(dir) {
+  // to the middle of the neighbouring frame, so timestamp rounding can never leave the picture on the same frame
+  const f = S.vfps || 30; pv.pause();
+  const k = Math.floor((pv.currentTime || 0) * f + 1e-3);
+  pv.currentTime = clamp((k + dir + 0.5) / f, 0, Math.max(0, S.src.duration - 0.001)); pvTick();
+}
+// frame rate from the first frames played at 1x, for files whose header was not read (webm etc.)
+function measureFps() {
+  if (S.vfps || !('requestVideoFrameCallback' in pv)) return;
+  const dts = []; let last = null;
+  const cb = (now, md) => {
+    if (S.vfps) return;
+    if (pv.playbackRate !== 1) last = null;
+    else { if (last != null && md.mediaTime > last) dts.push(md.mediaTime - last); last = md.mediaTime; }
+    if (dts.length >= 40) {
+      const s = [...dts].sort((a, b) => a - b), med = s[s.length >> 1], ok = s.filter(v => v > med * 0.6 && v < med * 1.4);   // dropped frames give 2x gaps
+      const fps = ok.length / ok.reduce((a, v) => a + v, 0);
+      // webm stores millisecond timestamps (33/34 ms at 30 fps), so snap to the standard rate it must be
+      const std = [2, 5, 10, 12, 15, 20, 23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60, 100, 119.88, 120].reduce((b, v) => Math.abs(v - fps) < Math.abs(b - fps) ? v : b);
+      S.vfps = Math.abs(std - fps) / std < 0.006 ? std : Math.round(fps * 100) / 100; pvTick(); return;
+    }
+    if (!pv.paused) pv.requestVideoFrameCallback(cb);
+  };
+  pv.requestVideoFrameCallback(cb);
+}
+// frame rate from the mp4 header: video track mdhd timescale / most common stts sample delta (exact before any playback)
+async function mp4Fps(file) {
+  const rd = async (o, n) => new DataView(await file.slice(o, o + n).arrayBuffer());
+  const tag = (dv, p) => String.fromCharCode(dv.getUint8(p + 4), dv.getUint8(p + 5), dv.getUint8(p + 6), dv.getUint8(p + 7));
+  let o = 0, moov = null;
+  while (o + 8 <= file.size && !moov) {
+    const h = await rd(o, 16); let sz = h.getUint32(0); if (sz === 1) sz = Number(h.getBigUint64(8)); else if (sz === 0) sz = file.size - o;
+    if (sz < 8) return 0;
+    if (tag(h, 0) === 'moov') { if (sz > 64 << 20) return 0; moov = await rd(o, sz); } else o += sz;
+  }
+  if (!moov) return 0;
+  const kids = (s, e) => { const out = []; for (let p = s; p + 8 <= e;) { let sz = moov.getUint32(p), hs = 8; if (sz === 1) { sz = Number(moov.getBigUint64(p + 8)); hs = 16; } else if (sz === 0) sz = e - p; if (sz < hs || p + sz > e) break; out.push({ t: tag(moov, p), s: p + hs, e: p + sz }); p += sz; } return out; };
+  const find = (b, ...path) => { for (const t of path) { b = b && kids(b.s, b.e).find(k => k.t === t); } return b; };
+  for (const trak of kids(8, moov.byteLength).filter(k => k.t === 'trak')) {
+    const hdlr = find(trak, 'mdia', 'hdlr'), mdhd = find(trak, 'mdia', 'mdhd'), stts = find(trak, 'mdia', 'minf', 'stbl', 'stts');
+    if (!hdlr || !mdhd || !stts || tag(moov, hdlr.s + 4) !== 'vide') continue;
+    const scale = moov.getUint32(mdhd.s + (moov.getUint8(mdhd.s) === 1 ? 20 : 12)), n = moov.getUint32(stts.s + 4), votes = new Map();
+    for (let i = 0; i < n && stts.s + 16 + 8 * i <= stts.e; i++) { const c = moov.getUint32(stts.s + 8 + 8 * i), dlt = moov.getUint32(stts.s + 12 + 8 * i); votes.set(dlt, (votes.get(dlt) || 0) + c); }
+    let best = 0, bc = 0; for (const [dlt, c] of votes) if (c > bc && dlt > 0) { best = dlt; bc = c; }
+    if (best && scale) return Math.round(100 * scale / best) / 100;
+  }
+  return 0;
+}
+
+let tlDrag = null;
+const tlTime = e => { const r = tl.getBoundingClientRect(); return clamp((e.clientX - r.left - 8) / Math.max(1, r.width - 16), 0, 1) * (S.src.duration || 0); };
+tl.addEventListener('pointerdown', e => { if (!S.src) return; tlDrag = { play: !pv.paused }; pv.pause(); tl.setPointerCapture(e.pointerId); pv.currentTime = tlTime(e); pvTick(); });
+tl.addEventListener('pointermove', e => { if (tlDrag) { pv.currentTime = tlTime(e); pvTick(); } });
+tl.addEventListener('pointerup', () => { if (tlDrag && tlDrag.play) pv.play().catch(() => {}); tlDrag = null; });
+tl.addEventListener('pointercancel', () => { tlDrag = null; });
+pv.addEventListener('click', pvToggle);
+// a mouse click leaves focus on the button; drop it so Space keeps meaning play/pause instead of pressing that button again
+const tap = fn => e => { fn(); if (e.detail) e.currentTarget.blur(); };
+$('pvplay').onclick = tap(pvToggle);
+$('pvbf').onclick = tap(() => pvFrame(-1)); $('pvff').onclick = tap(() => pvFrame(1));
+$('pvb1s').onclick = tap(() => pvStep(-1)); $('pvf1s').onclick = tap(() => pvStep(1));
+$('pvin').onclick = tap(markIn); $('pvout').onclick = tap(markOut);
+$('pvrate').onchange = () => { pv.playbackRate = +$('pvrate').value; };
+function cutKey(e) {
+  const k = e.key.toLowerCase();
+  if (k === ' ') { e.preventDefault(); pvToggle(); }
+  else if (k === 'arrowright' || k === 'arrowleft') { e.preventDefault(); const dir = k === 'arrowright' ? 1 : -1; if (e.shiftKey) pvStep(dir); else pvFrame(dir); }
+  else if (k === 'i' || e.code === 'KeyI') markIn();   // e.code too, so the keys work with the Korean input mode on
+  else if (k === 'o' || e.code === 'KeyO') markOut();
+}
+
 function startLabeling() {
   if (!S.frames.length) return;
-  setStep(3); $('p4').classList.remove('off'); $('p5').classList.remove('off'); $('empty').hidden = true;
-  if (S.src.kind === 'video') { const c = cutCfg(); const fps = c.mode === 'fps' ? c.val : c.mode === 'interval' ? 1 / c.val : S.frames.length / Math.max(0.1, (c.end || S.src.duration) - c.start); $('pfps').value = Math.max(0.2, Math.round(fps * 10) / 10); }
+  setStep(3); $('p4').classList.remove('off'); $('p5').classList.remove('off'); $('empty').hidden = true; setCutView(false);
+  if (S.src.kind === 'video') { const c = cutCfg(); const fps = c.mode === 'fps' ? c.val : c.mode === 'interval' ? 1 / c.val : S.frames.length / Math.max(0.1, segTotal()); $('pfps').value = Math.max(0.2, Math.round(fps * 10) / 10); }
   renderNotes();
   $('fslider').max = S.frames.length - 1; $('fidx').max = S.frames.length; $('ftotal').textContent = '/ ' + S.frames.length;
   if (!$('rfbatch').value) $('rfbatch').value = 'task3_click_' + new Date().toISOString().slice(0, 10);
@@ -837,6 +1063,7 @@ async function copyPrev() {
 function iou(a, b) { const ix = Math.max(0, Math.min(a.x2, b.x2) - Math.max(a.x1, b.x1)), iy = Math.max(0, Math.min(a.y2, b.y2) - Math.max(a.y1, b.y1)); const i = ix * iy; const u = (a.x2 - a.x1) * (a.y2 - a.y1) + (b.x2 - b.x1) * (b.y2 - b.y1) - i; return u > 0 ? i / u : 0; }
 document.addEventListener('keydown', e => {
   if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) return;
+  if (!$('cutview').hidden) { cutKey(e); return; }
   if (!S.frames.length) return;
   const k = e.key.toLowerCase(); const L = curLabels();
   if (k === 't') setMode('Tin'); else if (k === 'r') setMode('Rag');
@@ -853,7 +1080,7 @@ document.addEventListener('keydown', e => {
   else if (k === '+' || k === '=' || k === '-') { const r = cv.getBoundingClientRect(); zoomAt(k === '-' ? 0.8 : 1.25, r.width / 2, r.height / 2); }
   else if (k === 'a' && !e.ctrlKey) { pushHist(); autoLabelFrame(S.idx).then(b => { S.labels[S.frames[S.idx].name] = b; S.sel = -1; changed(); }); }
 });
-new ResizeObserver(() => draw()).observe($('stage'));
+new ResizeObserver(() => { draw(); drawTL(); }).observe($('stage'));
 
 // ---------- YOLO export ----------
 function yoloTxt(f) {
@@ -1394,7 +1621,7 @@ function trResult(s) {
 trInit();
 
 // test hook
-window.T3 = { S, TR, trPoll, toScr, view: () => view, segmentAt, hsvOf, showFrame, extract, voteColor, yoloTxt, TIN_HUE, PAD_HUE, startLabeling, setReview, startPlay, stopPlay, renderNotes, autoLabelFrame, runAutoLabel, readZip };
+window.T3 = { S, TR, trPoll, pv, plan, normSegs, mp4Fps, setCutView, markIn, markOut, toScr, view: () => view, segmentAt, hsvOf, showFrame, extract, voteColor, yoloTxt, TIN_HUE, PAD_HUE, startLabeling, setReview, startPlay, stopPlay, renderNotes, autoLabelFrame, runAutoLabel, readZip };
 })();
 </script>
 </body>
